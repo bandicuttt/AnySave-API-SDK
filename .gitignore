@@ -1,0 +1,74 @@
+# ─── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ─── Distribution / Packaging ───────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+*.whl
+.eggs/
+
+# ─── Virtual environments ───────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# ─── IDE ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ─── Testing ────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# ─── Mypy / type checkers ───────────────────────────────────
+.mypy_cache/
+.pytype/
+.pyre/
+
+# ─── Ruff ────────────────────────────────────────────────────
+.ruff_cache/
+
+# ─── OS ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Downloads (runtime artifacts) ──────────────────────────
+downloads/
+storage/
+*.mp4
+*.mp3
+*.m4a
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+
+# ─── Logs ────────────────────────────────────────────────────
+logs/
+*.log
+
+# ─── Environment variables ──────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Jupyter ─────────────────────────────────────────────────
+.ipynb_checkpoints/

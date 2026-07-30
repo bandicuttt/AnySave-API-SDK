@@ -1,0 +1,15 @@
+# SDK runtime dependencies (anysave_sdk/)
+#
+# ВНИМАНИЕ: SDK требует системный ffmpeg и ffprobe в PATH
+# (для HLS/DASH, merge video+audio, truncate и генерации thumbnails).
+# Они не устанавливаются через pip:
+#   Debian/Ubuntu: apt install ffmpeg
+#   macOS (brew):  brew install ffmpeg
+
+# Core HTTP
+httpx>=0.27.0,<1.0
+aiohttp>=3.9.0,<4.0
+aiofiles>=23.0.0
+
+# Data validation
+pydantic>=2.0.0,<3.0

@@ -51,7 +51,8 @@ anysave = AnySaveClient(
     task_poll_interval_s=2.0,
     task_max_poll_time_s=600.0,
     task_create_timeout_s=30.0,
-    max_file_size_mb=500,
+    max_concurrency=4,
+    concurrency_max_ttl_s=60.0,
 )
 
 # ─── Handlers ────────────────────────────────────────────────
@@ -72,8 +73,8 @@ async def handle_url(message: Message) -> None:
     url = (message.text or "").strip()
     status_msg = await message.answer("⏳ Создаю задачу на скачивание...")
 
-    result = await anysave.download_via_tasks(url)
-
+    result = await anysave.download_via_tasks(url, max_file_size_mb=500)
+    
     # ─── Таймаут ─────────────────────────────────────────────
     if result.error and result.error.code == ClientErrorCode.TASK_TIMEOUT:
         await status_msg.edit_text(

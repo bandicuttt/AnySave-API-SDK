@@ -46,7 +46,8 @@ anysave = AnySaveClient(
     download_dir=DOWNLOAD_DIR,
     prefer_telegram_cache=True,
     cache_lookup_timeout_s=5.0,
-    max_file_size_mb=50,
+    max_concurrency=4,
+    concurrency_max_ttl_s=60.0,
 )
 
 # ─── Handlers ────────────────────────────────────────────────
@@ -66,7 +67,7 @@ async def handle_url(message: Message) -> None:
     url = (message.text or "").strip()
     status_msg = await message.answer("⏳ Проверяю кэш...")
 
-    result = await anysave.smart_download(url)
+    result = await anysave.smart_download(url, max_file_size_mb=50)
 
     # ─── Cache hit: пересылаем через file_id ─────────────────
     if result.is_cached:

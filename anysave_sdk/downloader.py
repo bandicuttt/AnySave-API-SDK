@@ -16,10 +16,12 @@ from pathlib import Path
 
 import httpx
 
+from anysave_sdk._concurrency import LocalProcessingLimiter
 from anysave_sdk.api import fetch_api_response, fetch_links_api_response, make_api_error_result
 from anysave_sdk.cache import fetch_cache_lookup
 from anysave_sdk.download_pipeline import DownloadPipeline
 from anysave_sdk.error_codes import ClientErrorCode
+from anysave_sdk.exceptions import ConcurrencyLimitTimeoutError
 from anysave_sdk.models import (
     CachedResult,
     ClientError,
@@ -81,6 +83,7 @@ class AnySaveClient:
         download_dir: str | Path | None = None,
         chunk_size: int = 1024 * 512,
         max_concurrency: int = 4,
+        concurrency_max_ttl_s: float = 60.0,
         api_timeout_s: float = 900.0,
         download_timeout_s: float = 900.0,
         min_speed_bytes_per_sec: int = 10 * 1024,
@@ -103,10 +106,20 @@ class AnySaveClient:
         self.task_max_poll_time_s = float(task_max_poll_time_s)
         self.task_create_timeout_s = float(task_create_timeout_s)
 
+        self.max_concurrency = max(1, int(max_concurrency))
+        self.concurrency_max_ttl_s = float(concurrency_max_ttl_s)
+        if self.concurrency_max_ttl_s <= 0:
+            raise ValueError("concurrency_max_ttl_s must be > 0")
+
+        self._local_processing_limiter = LocalProcessingLimiter(
+            max_concurrency=self.max_concurrency,
+            wait_timeout_s=self.concurrency_max_ttl_s,
+        )
+
         self._pipeline = DownloadPipeline(
             download_dir=self.download_dir,
             chunk_size=int(chunk_size),
-            max_concurrency=int(max_concurrency),
+            max_concurrency=self.max_concurrency,
             download_timeout_s=float(download_timeout_s),
             min_speed_bytes_per_sec=int(min_speed_bytes_per_sec),
             download_retry_attempts=max(1, int(download_retry_attempts)),
@@ -129,26 +142,28 @@ class AnySaveClient:
         Порядок попыток:
 
         1. **Telegram cache** (если ``prefer_telegram_cache=True``):
-           Проверяется ровно один раз. При попадании мгновенно возвращается
-           ``status=CACHED`` с ``file_id``.
+        Проверяется ровно один раз. При попадании мгновенно возвращается
+        ``status=CACHED`` с ``file_id``.
 
         2. **Fast-link** (``/downloader/links``):
-           Сервер отдаёт CDN-ссылки, SDK скачивает самостоятельно.
-           Нет очереди, нет хранения на сервере.
+        Сервер отдаёт CDN-ссылки, SDK скачивает и обрабатывает файлы локально.
+        Весь local pipeline ограничен глобальным concurrency limiter'ом.
 
         3. **Task fallback** (``/downloader/tasks``):
-           Если fast-link не справился — создаётся фоновая задача.
-           Надёжнее для тяжёлых платформ (YouTube высокое качество и т.д.).
+        Если fast-link не справился, local slot не освободился за TTL
+        или локальная обработка упала — создаётся серверная задача,
+        где heavy operations выполняются на стороне API.
 
         Args:
             url: Ссылка на медиа (YouTube, TikTok, Instagram, Twitter/X и др.).
             mode: ``"auto"`` | ``"audio"`` | ``"video"``.
             quality: ``"max"`` | ``"2160"`` | ``"1440"`` | ``"1080"`` |
-                     ``"720"`` | ``"480"`` | ``"360"``.
+                    ``"720"`` | ``"480"`` | ``"360"``.
             use_cookies: Серверные cookies для приватного контента.
             max_file_size_mb:
                 Лимит размера в MB. При fast-link — SDK обрезает локально
-                через ffmpeg. При task fallback — сервер обрезает на своей стороне.
+                через ffmpeg. При fallback ``/downloader/tasks`` — сервер
+                выполняет обработку на своей стороне.
 
         Returns:
             :class:`DownloadResult`:
@@ -160,32 +175,7 @@ class AnySaveClient:
 
         Raises:
             Не выбрасывает исключений — все ошибки через ``DownloadResult(status=ERROR)``.
-
-        Examples:
-            Базовое использование::
-
-                result = await anysave.smart_download("https://youtu.be/dQw4w9WgXcQ")
-                if result.ok:
-                    for f in result.files:
-                        print(f.type, f.path)
-                else:
-                    print(result.error_msg)
-
-            Аудио с лимитом размера::
-
-                result = await anysave.smart_download(
-                    "https://youtu.be/dQw4w9WgXcQ",
-                    mode="audio",
-                    max_file_size_mb=10,
-                )
-
-            Telegram-кэш (``prefer_telegram_cache=True`` при инициализации)::
-
-                result = await anysave.smart_download("https://youtu.be/...")
-                if result.is_cached:
-                    await bot.send_video(chat_id, result.cached.files[0].file_id)
         """
-        # Cache lookup — ровно один раз. Дочерние методы получают _skip_cache=True.
         if self.prefer_telegram_cache:
             cached = await self._try_cache_lookup(url=url, mode=mode, quality=quality)
             if cached is not None:
@@ -195,7 +185,7 @@ class AnySaveClient:
                     cached=cached,
                 )
 
-        # 1-я попытка: fast-link
+        # 1-я попытка: fast-link + локальная обработка
         result = await self.download_links(
             url=url,
             mode=mode,
@@ -444,11 +434,16 @@ class AnySaveClient:
         """
         Fast-link скачивание: сервер даёт CDN-ссылки, SDK качает сам.
 
+        В отличие от server-side ``download()``, local /links pipeline ограничен
+        глобальным concurrency limiter'ом. Если свободный слот не появился
+        за ``concurrency_max_ttl_s``, метод вернёт ``status=ERROR`` с
+        кодом ``client_busy``.
+
         Args:
             url: Ссылка на медиа.
             mode: ``"auto"`` | ``"audio"`` | ``"video"``.
             quality: ``"max"`` | ``"2160"`` | ``"1440"`` | ``"1080"`` |
-                     ``"720"`` | ``"480"`` | ``"360"``.
+                    ``"720"`` | ``"480"`` | ``"360"``.
             use_cookies: Серверные cookies.
             max_file_size_mb:
                 Лимит в MB. Применяется SDK локально через ffmpeg.
@@ -486,7 +481,62 @@ class AnySaveClient:
             max_file_size_mb * 1024 * 1024 if max_file_size_mb else None
         )
 
-        return await self._pipeline.process_remote_result(remote, max_file_size_bytes)
+        return await self._process_remote_result_with_limit(
+            url=url,
+            remote=remote,
+            max_file_size_bytes=max_file_size_bytes,
+        )
+
+    async def _process_remote_result_with_limit(
+        self,
+        *,
+        url: str,
+        remote: RemoteDownloadResult,
+        max_file_size_bytes: int | None,
+    ) -> DownloadResult:
+        """
+        Запускает локальную fast-link обработку под глобальным concurrency limiter.
+
+        Если свободный слот не появился за ``concurrency_max_ttl_s``,
+        возвращает ``client_busy``. Любая неожиданная локальная ошибка
+        превращается в ``local_processing_failed``.
+        """
+        try:
+            async with self._local_processing_limiter.slot(label="download_links"):
+                return await self._pipeline.process_remote_result(
+                    remote,
+                    max_file_size_bytes,
+                )
+
+        except ConcurrencyLimitTimeoutError as exc:
+            logger.warning(
+                "Local fast-link slot timeout | url=%s max_concurrency=%d timeout=%.1fs",
+                url,
+                self.max_concurrency,
+                self.concurrency_max_ttl_s,
+            )
+            return DownloadResult(
+                status=DownloadStatus.ERROR,
+                files=[],
+                error=ClientError(
+                    code=ClientErrorCode.CLIENT_BUSY.value,
+                    detail=str(exc),
+                ),
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Local fast-link processing failed unexpectedly | url=%s",
+                url,
+            )
+            return DownloadResult(
+                status=DownloadStatus.ERROR,
+                files=[],
+                error=ClientError(
+                    code=ClientErrorCode.LOCAL_PROCESSING_FAILED.value,
+                    detail=f"Local fast-link processing failed: {type(exc).__name__}: {exc}",
+                ),
+            )
 
     # ─── Internal helpers ────────────────────────────────────
 

@@ -53,7 +53,7 @@ anysave = AnySaveClient(
     api_token=API_TOKEN,
     download_dir=DOWNLOAD_DIR,
     max_concurrency=4,
-    max_file_size_mb=50,        # лимит Telegram Bot API
+    concurrency_max_ttl_s=60.0,     # сколько ждать slot local /links pipeline
 )
 
 # ─── Handlers ────────────────────────────────────────────────
@@ -85,7 +85,7 @@ async def handle_url_message(message: Message) -> None:
 async def _handle_url(message: Message, url: str) -> None:
     status_msg = await message.answer("⏳ Скачиваю...")
 
-    result = await anysave.smart_download(url)
+    result = await anysave.smart_download(url, max_file_size_mb=50)
 
     if not result.ok:
         await status_msg.edit_text(

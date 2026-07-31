@@ -31,3 +31,22 @@ class IncompleteDownloadError(Exception):
             f"Incomplete download: got={bytes_downloaded} expected={expected_bytes} "
             f"| {type(original).__name__}: {original}"
         )
+
+
+class ConcurrencyLimitTimeoutError(Exception):
+    """Не удалось дождаться свободного слота локальной обработки."""
+
+    def __init__(
+        self,
+        *,
+        label: str,
+        max_concurrency: int,
+        timeout_s: float,
+    ):
+        self.label = label
+        self.max_concurrency = max_concurrency
+        self.timeout_s = timeout_s
+        super().__init__(
+            f"No free local processing slot for '{label}' within "
+            f"{timeout_s:.1f}s (max_concurrency={max_concurrency})"
+        )

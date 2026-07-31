@@ -17,7 +17,8 @@
 ## Зачем
 
 - **Один метод** — `smart_download()` выбирает оптимальную стратегию автоматически
-- **Auto-fallback** — fast-link → task pipeline, без вашего участия
+- **Auto-fallback** — fast-link → server-side download, без вашего участия
+- **Защита процесса** — глобальный limiter ограничивает число одновременно выполняемых local `/links` задач
 - **Telegram-ready** — cache lookup, truncate под 50 MB, thumbnails
 - **HLS / merge / resume** — SDK берёт на себя ffmpeg, split video+audio, дозагрузку
 - **Typed** — полная поддержка mypy / pyright
@@ -89,10 +90,10 @@ asyncio.run(main())
 
 | Метод | Когда использовать | API endpoint |
 |---|---|---|
-| `smart_download()` | **Рекомендуется.** Auto-fallback: fast-link → tasks | `/links` + `/tasks` |
-| `download_links()` | Только fast-link. SDK скачивает по CDN-ссылкам | `POST /downloader/links` |
-| `download_via_tasks()` | YouTube 4K, тяжёлые VOD > 10 мин | `POST /downloader/tasks` + polling |
-| `download()` | Sync endpoint. Сервер скачивает файл | `POST /downloader/` |
+| `smart_download()` | **Рекомендуется.** Auto-fallback: fast-link → task pipeline | `/links` + `/tasks` |
+| `download_links()` | Только fast-link. SDK скачивает и обрабатывает CDN-файлы локально | `POST /downloader/links` |
+| `download_via_tasks()` | Явный task pipeline для долгих / тяжёлых задач | `POST /downloader/tasks` + polling |
+| `download()` | Sync endpoint. Сервер скачивает и обрабатывает файл | `POST /downloader/` |
 | `get_remote_links()` | CDN-ссылки без скачивания | `POST /downloader/links` |
 
 ### `smart_download()`
@@ -195,7 +196,8 @@ anysave = AnySaveClient(
 
     download_dir="./downloads",
     chunk_size=512 * 1024,
-    max_concurrency=4,
+    max_concurrency=2,              # рекомендуется для bot / VPS окружения
+    concurrency_max_ttl_s=60.0,     # сколько ждать slot local /links pipeline
 
     api_timeout_s=900.0,
     download_timeout_s=900.0,
@@ -223,7 +225,8 @@ anysave = AnySaveClient(
 | `api_token` | `str \| None` | `None` | Bearer токен авторизации |
 | `download_dir` | `str \| Path` | `cwd()` | Директория для файлов |
 | `chunk_size` | `int` | `524288` | Размер чанка скачивания (байт) |
-| `max_concurrency` | `int` | `4` | Параллельных скачиваний |
+| `max_concurrency` | `int` | `4` | Макс. число одновременно выполняемых local `/links` задач; также используется как лимит параллельных скачиваний внутри local pipeline |
+| `concurrency_max_ttl_s` | `float` | `60.0` | Сколько ждать свободный slot local `/links` pipeline перед ошибкой `client_busy` |
 | `api_timeout_s` | `float` | `900.0` | Таймаут sync endpoint |
 | `download_timeout_s` | `float` | `900.0` | Таймаут скачивания файла |
 | `cache_lookup_timeout_s` | `float` | `10.0` | Таймаут Telegram cache |
@@ -236,6 +239,11 @@ anysave = AnySaveClient(
 | `thumbnail_placeholder` | `str \| None` | `None` | Путь к заглушке thumbnail |
 
 </details>
+
+> Лимитер применяется только к local обработке `download_links()` / `smart_download()` на fast-link пути.  
+> Server-side методы `download()` и `download_via_tasks()` не ограничиваются этим limiter'ом:
+> тяжёлая работа уже выполнена сервером, а клиент обычно делает только быстрый metadata fallback.
+> Это сознательно сохраняет UX и не создаёт лишнюю очередь для коротких операций.
 
 ---
 
@@ -255,6 +263,10 @@ if not result.ok:
         print(f"Rate limit: {err.detail}")
     elif err.code == ClientErrorCode.TASK_TIMEOUT:
         print("Сервер не успел за отведённое время")
+    elif err.code == ClientErrorCode.CLIENT_BUSY:
+        print("Локальный fast-link pipeline занят")
+    elif err.code == ClientErrorCode.LOCAL_PROCESSING_FAILED:
+        print("Локальная обработка fast-link завершилась ошибкой")
     elif err.code == ClientErrorCode.SOME_DOWNLOADS_FAILED:
         if result.files:
             print(f"Частично: {len(result.files)} файл(ов)")
@@ -275,6 +287,8 @@ if not result.ok:
 | `api_unauthorized` | HTTP 401 — неверный токен |
 | `api_rate_limited` | HTTP 429 — превышен лимит запросов |
 | `server_busy` | Сервер перегружен |
+| `client_busy` | Local `/links` pipeline не получил slot за `concurrency_max_ttl_s` |
+| `local_processing_failed` | Локальная обработка fast-link завершилась ошибкой |
 | `unknown_response` | Неизвестный формат ответа |
 | `some_downloads_failed` | Часть файлов из карусели не скачалась |
 | `cache_lookup_failed` | Ошибка Telegram cache (flow продолжается) |
@@ -285,6 +299,9 @@ if not result.ok:
 | `task_download_error` | Задача завершена, скачивание упало |
 
 </details>
+
+> `client_busy` и `local_processing_failed` чаще всего видны при прямом вызове `download_links()`.  
+> В `smart_download()` эти состояния обычно приводят к автоматическому fallback в `download_via_tasks()`.
 
 ---
 

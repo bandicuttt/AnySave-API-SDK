@@ -42,10 +42,16 @@ class ClientErrorCode(str, Enum):
         API_RATE_LIMITED    — превышен лимит запросов (HTTP 429).
         SERVER_BUSY         — сервер перегружен, нет свободных слотов.
 
+    **Локальная обработка на стороне SDK**:
+
+        CLIENT_BUSY             — локальный /links pipeline не получил слот
+                                  за отведённый TTL.
+        LOCAL_PROCESSING_FAILED — локальная обработка /links упала неожиданно.
+
     **Скачивание файлов** — ошибки локального скачивания:
 
-        UNKNOWN_RESPONSE        — сервер вернул неизвестный формат ответа.
-        SOME_DOWNLOADS_FAILED   — часть файлов из carousel не скачалась.
+        UNKNOWN_RESPONSE      — сервер вернул неизвестный формат ответа.
+        SOME_DOWNLOADS_FAILED — часть файлов из carousel не скачалась.
 
     **Кэш** — ошибки Telegram-кэша:
 
@@ -74,10 +80,14 @@ class ClientErrorCode(str, Enum):
     API_RATE_LIMITED = "api_rate_limited"
     SERVER_BUSY = "server_busy"
 
+    # ─── Local processing ────────────────────────────────────
+    CLIENT_BUSY = "client_busy"
+    LOCAL_PROCESSING_FAILED = "local_processing_failed"
+
     # ─── Download ────────────────────────────────────────────
     UNKNOWN_RESPONSE = "unknown_response"
     SOME_DOWNLOADS_FAILED = "some_downloads_failed"
-    
+
     # ─── Cache lookup ────────────────────────────────────────
     CACHE_LOOKUP_FAILED = "cache_lookup_failed"
 

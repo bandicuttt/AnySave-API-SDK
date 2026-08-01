@@ -192,19 +192,29 @@ class DownloadPipeline:
         Скачивает файлы из RemoteDownloadResult.
 
         Сценарии:
-        - split video + audio (remote.audio is not None) → merge
+        - split video + audio (один video/animation + отдельный audio) → merge
+        - photo carousel + audio → скачать фото и аудио раздельно
         - HLS manifest → ffmpeg download
         - Direct URL → aiohttp / httpx
         """
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
-        # Сценарий: split video + audio → merge
-        if remote.audio is not None and len(remote.files) == 1:
+        # Сценарий: split video + audio → merge только для настоящего видео
+        if (
+            remote.audio is not None
+            and len(remote.files) == 1
+            and remote.files[0].is_video
+        ):
             return await self._download_and_merge(
-                remote.files[0], remote.audio, max_file_size_bytes,
+                remote.files[0],
+                remote.audio,
+                max_file_size_bytes,
             )
 
-        # Сценарий: один или несколько файлов
+        files_to_download = list(remote.files)
+        if remote.audio is not None:
+            files_to_download.append(remote.audio)
+
         sem = asyncio.Semaphore(self.max_concurrency)
         connector = aiohttp.TCPConnector(limit=self.max_concurrency)
 
@@ -213,10 +223,12 @@ class DownloadPipeline:
             async def _guarded(rf: RemoteFile) -> DownloadedFile | None:
                 async with sem:
                     return await self._download_remote_file(
-                        session, rf, max_file_size_bytes,
+                        session,
+                        rf,
+                        max_file_size_bytes,
                     )
 
-            downloaded = await asyncio.gather(*[_guarded(f) for f in remote.files])
+            downloaded = await asyncio.gather(*[_guarded(f) for f in files_to_download])
 
         ok_files = [f for f in downloaded if f is not None]
 
@@ -226,17 +238,17 @@ class DownloadPipeline:
                 files=[],
                 error=ClientError(
                     code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
-                    detail=f"All {len(remote.files)} downloads failed",
+                    detail=f"All {len(files_to_download)} downloads failed",
                 ),
             )
 
-        if len(ok_files) != len(remote.files):
+        if len(ok_files) != len(files_to_download):
             return DownloadResult(
                 status=DownloadStatus.PARTIAL,
                 files=ok_files,
                 error=ClientError(
                     code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
-                    detail=f"Expected {len(remote.files)}, got {len(ok_files)}",
+                    detail=f"Expected {len(files_to_download)}, got {len(ok_files)}",
                 ),
             )
 

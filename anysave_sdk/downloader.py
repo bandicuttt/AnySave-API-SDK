@@ -136,13 +136,14 @@ class AnySaveClient:
         quality: str = "max",
         use_cookies: bool = False,
         max_file_size_mb: int | None = None,
+        _skip_cache: bool = False,
     ) -> DownloadResult:
         """
         Рекомендуемый метод — выбирает стратегию автоматически.
 
         Порядок попыток:
 
-        1. **Telegram cache** (если ``prefer_telegram_cache=True``):
+        1. **Telegram cache** (если ``prefer_telegram_cache=True`` и ``_skip_cache=False``):
         Проверяется ровно один раз. При попадании мгновенно возвращается
         ``status=CACHED`` с ``file_id``.
 
@@ -165,6 +166,9 @@ class AnySaveClient:
                 Лимит размера в MB. При fast-link — SDK обрезает локально
                 через ffmpeg. При fallback ``/downloader/tasks`` — сервер
                 выполняет обработку на своей стороне.
+            _skip_cache:
+                Внутренний флаг для принудительного пропуска Telegram cache lookup.
+                Нужен сценариям, которым обязательно требуются локальные файлы.
 
         Returns:
             :class:`DownloadResult`:
@@ -177,7 +181,7 @@ class AnySaveClient:
         Raises:
             Не выбрасывает исключений — все ошибки через ``DownloadResult(status=ERROR)``.
         """
-        if self.prefer_telegram_cache:
+        if self.prefer_telegram_cache and not _skip_cache:
             cached = await self._try_cache_lookup(url=url, mode=mode, quality=quality)
             if cached is not None:
                 return DownloadResult(

@@ -105,6 +105,7 @@ class AnySaveClient:
         self.task_poll_interval_s = float(task_poll_interval_s)
         self.task_max_poll_time_s = float(task_max_poll_time_s)
         self.task_create_timeout_s = float(task_create_timeout_s)
+        self.thumbnail_placeholder = thumbnail_placeholder
 
         self.max_concurrency = max(1, int(max_concurrency))
         self.concurrency_max_ttl_s = float(concurrency_max_ttl_s)

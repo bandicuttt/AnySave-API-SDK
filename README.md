@@ -33,14 +33,14 @@ result = await anysave.smart_download("https://youtu.be/dQw4w9WgXcQ")
 ## Установка
 
 ```bash
-pip install anysave-api-sdk
+python -m pip install -e .
 ```
 
 С поддержкой Telegram-ботов:
 
 ```bash
-pip install "anysave-api-sdk[aiogram3]"   # aiogram 3 (рекомендуется)
-pip install "anysave-api-sdk[aiogram2]"   # aiogram 2 (legacy)
+python -m pip install -e ".[aiogram3]"  # aiogram 3 (рекомендуется)
+python -m pip install -e ".[aiogram2]"  # aiogram 2 (legacy)
 ```
 
 **Системные зависимости** (для HLS, merge, truncate, thumbnails):
@@ -65,7 +65,7 @@ from anysave_sdk import AnySaveClient
 
 async def main():
     anysave = AnySaveClient(
-        api_base_url="https://api.example.com",
+        api_base_url="https://anysave.click",
         api_token="YOUR_TOKEN",
         download_dir="./downloads",
     )
@@ -191,7 +191,7 @@ result = await anysave.download_via_tasks(
 
 ```python
 anysave = AnySaveClient(
-    api_base_url="https://api.example.com",  # обязательный
+    api_base_url="https://anysave.click",  # обязательный
     api_token="YOUR_TOKEN",
 
     download_dir="./downloads",
@@ -221,7 +221,7 @@ anysave = AnySaveClient(
 
 | Параметр | Тип | Default | Описание |
 |---|---|---|---|
-| `api_base_url` | `str` | — | URL AnySave API сервера (обязательный) |
+| `api_base_url` | `str` | — | URL AnySave API сервера (https://anysave.click) |
 | `api_token` | `str \| None` | `None` | Bearer токен авторизации |
 | `download_dir` | `str \| Path` | `cwd()` | Директория для файлов |
 | `chunk_size` | `int` | `524288` | Размер чанка скачивания (байт) |

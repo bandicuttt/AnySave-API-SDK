@@ -5,7 +5,7 @@ Telegram-бот на aiogram 3 — базовый пример.
 Поддерживает видео, аудио, фото, карусели (до 10 файлов в группе).
 
 Установка:
-    pip install "media-downloader-sdk[aiogram3]"
+    python -m pip install -e ".[aiogram3]"
 
 Системные зависимости:
     apt install ffmpeg

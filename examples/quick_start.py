@@ -1,8 +1,8 @@
 """
-Минимальный пример использования Media Downloader SDK.
+Минимальный пример использования AnySave API SDK.
 
 Установка:
-    pip install media-downloader-sdk
+    pip install -e .
 
 Системные зависимости (для HLS, merge, thumbnails):
     apt install ffmpeg   # Ubuntu/Debian

@@ -13,7 +13,7 @@ get_remote_links() возвращает прямые CDN URL.
   - Некоторые CDN блокируют Telegram-серверы
 
 Установка:
-    pip install "media-downloader-sdk[aiogram3]"
+    python -m pip install -e ".[aiogram3]"
 
 Переменные окружения:
     BOT_TOKEN       — Telegram Bot Token

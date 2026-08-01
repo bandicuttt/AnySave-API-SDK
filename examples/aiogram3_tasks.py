@@ -10,7 +10,7 @@ download_via_tasks(): создаёт задачу на сервере, ждёт 
   - Инфраструктура требует неблокирующей очереди
 
 Установка:
-    pip install "media-downloader-sdk[aiogram3]"
+    python -m pip install -e ".[aiogram3]"
 
 Переменные окружения:
     BOT_TOKEN       — Telegram Bot Token

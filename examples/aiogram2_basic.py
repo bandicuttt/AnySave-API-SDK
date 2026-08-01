@@ -4,7 +4,7 @@ Telegram-бот на aiogram 2 — базовый пример (legacy).
 Для новых проектов рекомендуется aiogram3_basic.py.
 
 Установка:
-    pip install "media-downloader-sdk[aiogram2]"
+    python -m pip install -e ".[aiogram2]"
 
 Системные зависимости:
     apt install ffmpeg

@@ -6,7 +6,7 @@ prefer_telegram_cache=True: перед скачиванием SDK проверя
 без повторной загрузки в Telegram. Экономит трафик и время.
 
 Установка:
-    pip install "media-downloader-sdk[aiogram3]"
+    python -m pip install -e ".[aiogram3]"
 
 Переменные окружения:
     BOT_TOKEN       — Telegram Bot Token

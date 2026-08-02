@@ -39,10 +39,9 @@ def safe_filename(filename: str) -> str:
 
 
 def unique_path(path: Path) -> Path:
-    """Гарантирует уникальность пути, добавляя UUID-суффикс при коллизии."""
-    if not path.exists():
-        return path
-    return path.with_name(f"{path.stem}_{uuid.uuid4().hex}{path.suffix}")
+    """Возвращает уникальный путь с UUID-суффиксом, избегая гонок по имени файла."""
+    stem = path.stem or "file"
+    return path.with_name(f"{stem}_{uuid.uuid4().hex}{path.suffix}")
 
 
 def map_type(t: str) -> str:

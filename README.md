@@ -7,6 +7,10 @@
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Typed](https://img.shields.io/badge/typing-py.typed-green.svg)](py.typed)
+[![Website](https://img.shields.io/badge/website-anysave.click-0087eb.svg)](https://anysave.click)
+[![API Docs](https://img.shields.io/badge/docs-api-blue.svg)](https://anysave.click/docs)
+
+[Website](https://anysave.click) • [API Docs](https://anysave.click/docs) • [Playground](https://anysave.click/docs/playground) • [Get API key](https://anysave.click)
 
 [Установка](#установка) • [Быстрый старт](#быстрый-старт) • [Методы](#методы) • [Примеры](#примеры) • [Конфигурация](#конфигурация) • [Обработка ошибок](#обработка-ошибок)
 
@@ -59,6 +63,8 @@ brew install ffmpeg
 
 ## Быстрый старт
 
+> Получить бесплатный API токен — [anysave.click](https://anysave.click) (1000 кредитов на старте, без карты).
+
 ```python
 import asyncio
 from anysave_sdk import AnySaveClient
@@ -83,6 +89,8 @@ async def main():
 
 asyncio.run(main())
 ```
+> Полная документация API-эндпоинтов и стоимость в кредитах — [anysave.click/docs](https://anysave.click/docs).
+> Протестировать любой эндпоинт в браузере — [Playground](https://anysave.click/docs/playground).
 
 ---
 
@@ -372,11 +380,16 @@ remote.files[0].filename
 
 - **Python 3.10+**
 - **ffmpeg** в PATH — для HLS, merge video+audio, truncate, thumbnails
-- Доступ к AnySave-совместимому API серверу
-
-> Серверная часть (API backend) не входит в этот репозиторий.
-
+- Доступ к AnySave
 ---
+
+## Ссылки
+
+- [AnySave API — официальный сайт](https://anysave.click)
+- [Документация API](https://anysave.click/docs)
+- [Interactive Playground](https://anysave.click/docs/playground)
+- [Стоимость эндпоинтов в кредитах](https://anysave.click/docs)
+- [Telegram support](https://t.me/AnySaveAPI)
 
 ## Лицензия
 

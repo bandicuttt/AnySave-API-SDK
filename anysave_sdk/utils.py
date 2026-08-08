@@ -38,6 +38,35 @@ def safe_filename(filename: str) -> str:
     return name or str(uuid.uuid4())
 
 
+def normalize_extension(filename: str, file_type: str) -> str:
+    """
+    Нормализует расширение файла в зависимости от логического типа.
+    
+    Если файл уже имеет подходящее расширение — оно сохраняется.
+    Если нет — заменяется на дефолтное для данного типа.
+    """
+    safe_name = safe_filename(filename)
+    mapped_type = map_type(file_type)
+
+    stem, _, ext = safe_name.rpartition(".")
+    ext_lower = ext.lower()
+
+    if mapped_type == "photo":
+        if ext_lower not in {"jpg", "jpeg", "png", "webp"}:
+            return f"{stem or safe_name}.jpg"
+    elif mapped_type == "animation":
+        if ext_lower not in {"mp4", "webm", "gif"}:
+            return f"{stem or safe_name}.mp4"
+    elif mapped_type == "audio":
+        if ext_lower not in {"mp3", "m4a", "ogg", "wav"}:
+            return f"{stem or safe_name}.mp3"
+    elif mapped_type == "video":
+        if ext_lower not in {"mp4", "webm", "mkv", "mov"}:
+            return f"{stem or safe_name}.mp4"
+
+    return safe_name
+
+
 def unique_path(path: Path) -> Path:
     """Возвращает уникальный путь с UUID-суффиксом, избегая гонок по имени файла."""
     stem = path.stem or "file"

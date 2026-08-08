@@ -45,7 +45,7 @@ from anysave_sdk.transport import (
     download_with_httpx,
     resume_incomplete_download,
 )
-from anysave_sdk.utils import fmt_size, map_type, safe_filename, safe_unlink, unique_path
+from anysave_sdk.utils import fmt_size, map_type, normalize_extension, safe_unlink, unique_path
 
 if TYPE_CHECKING:
     pass
@@ -264,7 +264,7 @@ class DownloadPipeline:
     ) -> DownloadedFile | None:
         """Скачивает один remote file: direct URL или HLS manifest."""
         dest = unique_path(
-            (self.download_dir / safe_filename(remote_file.filename)).resolve()
+            (self.download_dir / normalize_extension(remote_file.filename, remote_file.type)).resolve()
         )
         try:
             if remote_file.is_hls_manifest:
@@ -361,10 +361,10 @@ class DownloadPipeline:
     ) -> DownloadResult:
         """Скачивает video и audio раздельно, мёржит через ffmpeg."""
         video_dest = unique_path(
-            (self.download_dir / safe_filename(f"video_{video_remote.filename}")).resolve()
+            (self.download_dir / normalize_extension(f"video_{video_remote.filename}", video_remote.type)).resolve()
         )
         audio_dest = unique_path(
-            (self.download_dir / safe_filename(f"audio_{audio_remote.filename}")).resolve()
+            (self.download_dir / normalize_extension(f"audio_{audio_remote.filename}", audio_remote.type)).resolve()
         )
 
         logger.info(
@@ -399,7 +399,7 @@ class DownloadPipeline:
                 )
 
             merged_dest = unique_path(
-                (self.download_dir / safe_filename(video_remote.filename)).resolve()
+                (self.download_dir / normalize_extension(video_remote.filename, video_remote.type)).resolve()
             )
             merge_ok = await merge_video_audio(
                 video_path=video_dest,
@@ -607,7 +607,7 @@ class DownloadPipeline:
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
         dest = unique_path(
-            (self.download_dir / safe_filename(file.filename)).resolve()
+            (self.download_dir / normalize_extension(file.filename, file.type)).resolve()
         )
         headers = build_download_headers(file)
 

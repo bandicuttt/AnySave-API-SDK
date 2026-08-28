@@ -425,8 +425,29 @@ class DownloadPipeline:
                 merged_dest, video_remote, max_file_size_bytes, is_partial=False,
             )
 
+        except (FileNotFoundError, OSError) as e:
+            logger.warning(
+                "Merge pipeline file error | %s: %s",
+                type(e).__name__,
+                e,
+            )
+            safe_unlink(video_dest)
+            safe_unlink(audio_dest)
+            return DownloadResult(
+                status=DownloadStatus.ERROR,
+                files=[],
+                error=ClientError(
+                    code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
+                    detail=f"Merge pipeline file error: {type(e).__name__}: {e}",
+                ),
+            )
+
         except Exception as e:
-            logger.error("Merge pipeline error: %s: %s", type(e).__name__, e)
+            logger.warning(
+                "Merge pipeline error | %s: %s",
+                type(e).__name__,
+                e,
+            )
             safe_unlink(video_dest)
             safe_unlink(audio_dest)
             return DownloadResult(
@@ -562,7 +583,37 @@ class DownloadPipeline:
         is_partial: bool,
     ) -> DownloadResult:
         """Финализирует один файл: truncate, metadata, DownloadResult."""
-        file_size = dest.stat().st_size
+        if not dest.exists():
+            logger.warning(
+                "Finalize skipped: file missing on disk | path=%s",
+                dest,
+            )
+            return DownloadResult(
+                status=DownloadStatus.ERROR,
+                files=[],
+                error=ClientError(
+                    code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
+                    detail=f"File missing before finalize: {dest.name}",
+                ),
+            )
+
+        try:
+            file_size = dest.stat().st_size
+        except OSError as e:
+            logger.warning(
+                "Finalize skipped: cannot stat file | path=%s error=%s",
+                dest,
+                e,
+            )
+            return DownloadResult(
+                status=DownloadStatus.ERROR,
+                files=[],
+                error=ClientError(
+                    code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
+                    detail=f"Cannot stat file: {e}",
+                ),
+            )
+
         was_truncated = False
 
         if max_file_size_bytes and file_size > max_file_size_bytes:

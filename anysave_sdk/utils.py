@@ -2,12 +2,10 @@
 
 """Общие утилиты клиента скачивания."""
 
-import uuid
 import re
-
+import uuid
 from contextlib import suppress
 from pathlib import Path
-
 
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _MAX_FILENAME_LENGTH = 200
@@ -60,9 +58,8 @@ def normalize_extension(filename: str, file_type: str) -> str:
     elif mapped_type == "audio":
         if ext_lower not in {"mp3", "m4a", "ogg", "wav"}:
             return f"{stem or safe_name}.mp3"
-    elif mapped_type == "video":
-        if ext_lower not in {"mp4", "webm", "mkv", "mov"}:
-            return f"{stem or safe_name}.mp4"
+    elif mapped_type == "video" and ext_lower not in {"mp4", "webm", "mkv", "mov"}:
+        return f"{stem or safe_name}.mp4"
 
     return safe_name
 
@@ -98,6 +95,25 @@ def fmt_size(size: int | None) -> str:
     if size < 1024 * 1024:
         return f"{size / 1024:.1f} KB"
     return f"{size / (1024 * 1024):.2f} MB"
+
+
+def fmt_duration(seconds: float | int | None) -> str:
+    """
+    Человекочитаемая длительность.
+
+    ``None`` или отрицательное значение → ``"--:--"`` (заглушка для UI).
+
+        95.4   → "1:35"
+        3661    → "1:01:01"
+    """
+    if seconds is None or seconds < 0:
+        return "--:--"
+    total = int(round(float(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 
 def safe_unlink(path: Path) -> None:

@@ -3,8 +3,9 @@
 """Pydantic-модели API-ответов и результатов скачивания."""
 
 from enum import Enum
+from urllib.parse import parse_qs, urlparse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class DownloadStatus(str, Enum):
@@ -412,3 +413,255 @@ class RemoteDownloadResult(BaseModel):
         if self.error is None:
             return None
         return self.error.detail or self.error.code or str(self.error)
+
+
+# ─── Search API (/search/*) ──────────────────────────────────
+
+
+class MusicSearchResult(BaseModel):
+    """
+    Трек из ``/search/music`` или ``/search/chart`` (универсальное представление).
+
+    Источник данных определяется полем ``source``: ``"deezer"`` или ``"itunes"``.
+
+    Attributes:
+        id:               ID трека в исходной системе (Deezer / iTunes).
+        title:            Название трека.
+        artist:           Исполнитель.
+        album:            Название альбома (может быть ``None``).
+        duration_seconds: Длительность в СЕКУНДАХ (может быть дробной).
+        cover_url_small:  Обложка ~50-60px.
+        cover_url_medium: Обложка ~120-250px.
+        cover_url_big:    Обложка ~500-1000px.
+        preview_url:      30-секундный превью-URL (только Deezer,
+                          для iTunes обычно ``None``).
+        release_date:     Дата релиза в формате ISO 8601 (``YYYY-MM-DD``).
+        isrc:             International Standard Recording Code
+                          (в текущей версии API всегда ``None``).
+        is_explicit:      Содержит ли трек explicit-контент —
+                          фильтрация на стороне SDK/UI при необходимости.
+        source:           ``"deezer"`` | ``"itunes"``.
+        source_url:       Ссылка на трек в источнике.
+        yt_query:         Готовый запрос для ``/search/youtube``
+                          (обычно ``"{artist} - {title} official audio"``).
+                          Можно передавать как есть или переопределить.
+
+    Properties:
+        is_deezer: ``True`` если трек пришёл из Deezer.
+        is_itunes: ``True`` если трек пришёл из iTunes.
+
+    Example::
+
+        track = (await anysave.search_music("The Weeknd")).results[0]
+        print(track.artist, track.title, track.duration_seconds)
+        hits = await anysave.search_youtube(track.yt_query)
+    """
+
+    id: str
+    title: str
+    artist: str
+    album: str | None = None
+    duration_seconds: float | None = None
+    cover_url_small: str | None = None
+    cover_url_medium: str | None = None
+    cover_url_big: str | None = None
+    preview_url: str | None = None
+    release_date: str | None = None
+    isrc: str | None = None
+    is_explicit: bool = False
+    source: str = ""
+    source_url: str | None = None
+    yt_query: str = ""
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _coerce_id_to_str(cls, v: object) -> str:
+        # iTunes trackId может приходить как int — нормализуем в str.
+        return str(v)
+
+    @property
+    def is_deezer(self) -> bool:
+        return self.source == "deezer"
+
+    @property
+    def is_itunes(self) -> bool:
+        return self.source == "itunes"
+
+
+class MusicSearchResponse(BaseModel):
+    """
+    Ответ ``POST /search/music`` (и база для ``GET /search/chart``).
+
+    Пустой ``results`` — это успешный ответ (200), а не ошибка.
+
+    Attributes:
+        results:       Список :class:`MusicSearchResult`.
+        total_results: Всего результатов на сервере (больше, чем в одной странице).
+        next_cursor:   Непрозрачный курсор следующей страницы.
+                       ``None`` — страниц больше нет. Курсор нельзя парсить
+                       и конструировать — только передавать как есть.
+        query:         Эхо исходного запроса.
+
+    Properties:
+        has_more:  ``True`` если есть следующая страница.
+        is_empty:  ``True`` если результатов нет.
+
+    Example::
+
+        page = await anysave.search_music("rock", limit=25)
+        all_tracks = list(page.results)
+        while page.next_cursor:
+            page = await anysave.search_music("rock", limit=25, cursor=page.next_cursor)
+            all_tracks.extend(page.results)
+    """
+
+    results: list[MusicSearchResult] = []
+    total_results: int = 0
+    next_cursor: str | None = None
+    query: str = ""
+
+    @property
+    def has_more(self) -> bool:
+        return self.next_cursor is not None
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self.results) == 0
+
+
+class MusicChartResponse(MusicSearchResponse):
+    """
+    Ответ ``GET /search/chart`` — глобальный чарт Deezer.
+
+    Структура совпадает с :class:`MusicSearchResponse`.
+    ``source`` у всех треков всегда ``"deezer"`` (fallback на iTunes
+    для чартов отсутствует — у iTunes нет публичного chart API).
+    """
+
+
+class YoutubeSearchHit(BaseModel):
+    """
+    Видео из ``/search/youtube``.
+
+    Отдельная структура, НЕ содержит полей :class:`MusicSearchResult`.
+    ``upload_date`` — в формате YouTube ``YYYYMMDD`` (без разделителей).
+
+    Attributes:
+        url:              Полный URL видео
+                          (всегда ``https://www.youtube.com/watch?v=<ID>``).
+        title:            Название видео.
+        channel:          Название канала (может быть ``None``).
+        duration_seconds: Длительность в СЕКУНДАХ.
+        view_count:       Число просмотров.
+        thumbnail_url:    Лучший доступный thumbnail.
+        upload_date:      Дата загрузки в формате ``YYYYMMDD``.
+
+    Properties:
+        video_id: YouTube ID видео (парсится из ``url``).
+
+    Example::
+
+        hits = await anysave.search_youtube("how to tie a tie tutorial", limit=10)
+        print(hits.results[0].url, hits.results[0].video_id)
+    """
+
+    url: str
+    title: str
+    channel: str | None = None
+    duration_seconds: float | None = None
+    view_count: int | None = None
+    thumbnail_url: str | None = None
+    upload_date: str | None = None
+
+    @property
+    def video_id(self) -> str | None:
+        """YouTube ID видео, извлечённый из URL."""
+        query = parse_qs(urlparse(self.url).query)
+        values = query.get("v")
+        return values[0] if values else None
+
+
+class YoutubeSearchResponse(BaseModel):
+    """
+    Ответ ``POST /search/youtube``.
+
+    В v1 пагинация НЕ поддерживается — ``next_cursor`` всегда ``None``.
+    Пустой ``results`` — успешный ответ (200), а не ошибка.
+
+    Attributes:
+        results:     Список :class:`YoutubeSearchHit`.
+        next_cursor: Всегда ``None`` в v1.
+        query:       Эхо исходного запроса.
+
+    Properties:
+        has_more:  ``True`` если есть следующая страница (в v1 всегда ``False``).
+        is_empty:  ``True`` если результатов нет.
+    """
+
+    results: list[YoutubeSearchHit] = []
+    next_cursor: str | None = None
+    query: str = ""
+
+    @property
+    def has_more(self) -> bool:
+        return self.next_cursor is not None
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self.results) == 0
+
+
+class TrackResult(BaseModel):
+    """
+    Единый результат :meth:`AnySaveClient.get_track` — метаданные + скачивание.
+
+    Attributes:
+        query:    Исходный запрос (для готового ``track`` — ``"{artist} - {title}"``).
+        track:    Найденный трек (:class:`MusicSearchResult`) или ``None``,
+                  если музыкальный поиск ничего не вернул.
+        hit:      Выбранное YouTube-видео (:class:`YoutubeSearchHit`)
+                  или ``None``, если кандидатов не нашлось.
+        download: Итог скачивания (:class:`DownloadResult`). Заполнен всегда —
+                  при пустом поиске это ``status=ERROR`` с кодом ``no_results``.
+
+    Properties:
+        ok:        ``True`` если трек найден и файлы скачаны.
+        files:     Shortcut к ``download.files``.
+        is_cached: ``True`` если результат из Telegram-кэша.
+        error_msg: Человекочитаемое сообщение об ошибке или ``None``.
+
+    Example::
+
+        got = await anysave.get_track("The Weeknd Blinding Lights")
+        if got.ok:
+            print(got.track.artist, got.track.title)
+            print(got.hit.url, got.files[0].path)
+        else:
+            print(got.error_msg)  # напр. код no_results
+    """
+
+    query: str = ""
+    track: MusicSearchResult | None = None
+    hit: YoutubeSearchHit | None = None
+    download: DownloadResult
+
+    @property
+    def ok(self) -> bool:
+        return self.track is not None and self.download.ok
+
+    @property
+    def files(self) -> list[DownloadedFile]:
+        return self.download.files
+
+    @property
+    def is_cached(self) -> bool:
+        return self.download.is_cached
+
+    @property
+    def error_msg(self) -> str | None:
+        message = self.download.error_msg
+        if message is not None:
+            return message
+        if self.track is None:
+            return f"No music results for {self.query!r}"
+        return None

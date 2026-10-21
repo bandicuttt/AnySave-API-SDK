@@ -27,8 +27,15 @@ from anysave_sdk.models import (
     ClientError,
     DownloadResult,
     DownloadStatus,
+    MusicChartResponse,
+    MusicSearchResponse,
+    MusicSearchResult,
     RemoteDownloadResult,
+    TrackResult,
+    YoutubeSearchHit,
+    YoutubeSearchResponse,
 )
+from anysave_sdk.search import fetch_music_chart, fetch_music_search, fetch_youtube_search
 from anysave_sdk.tasks import create_download_task, fetch_task_result
 
 logger = logging.getLogger("api_client")
@@ -45,6 +52,37 @@ def _log_api_failure(context: str, exc: Exception) -> None:
         logger.warning("%s: %s: %s", context, type(exc).__name__, exc)
     else:
         logger.error("%s: %s: %s", context, type(exc).__name__, exc)
+
+
+def _no_results_download(detail: str) -> DownloadResult:
+    """``DownloadResult(status=ERROR, code=no_results)`` для get_track()."""
+    return DownloadResult(
+        status=DownloadStatus.ERROR,
+        files=[],
+        error=ClientError(code=ClientErrorCode.NO_RESULTS.value, detail=detail),
+    )
+
+
+def _pick_closest_duration(
+    track: MusicSearchResult,
+    hits: list[YoutubeSearchHit],
+) -> YoutubeSearchHit:
+    """
+    Лучший YouTube-кандидат для трека: минимальное расхождение длительностей.
+
+    Хиты без ``duration_seconds`` считаются «бесконечно далёкими», но если
+    длительность неизвестна у трека или у всех хитов — берётся первый.
+    """
+    if track.duration_seconds is None:
+        return hits[0]
+    return min(
+        hits,
+        key=lambda h: (
+            abs(h.duration_seconds - track.duration_seconds)
+            if h.duration_seconds is not None
+            else float("inf")
+        ),
+    )
 
 
 class AnySaveClient:
@@ -72,6 +110,10 @@ class AnySaveClient:
         - ``download_via_tasks()``  — только task pipeline.
         - ``download()``            — только sync endpoint.
         - ``get_remote_links()``    — CDN-ссылки без скачивания.
+        - ``search_music()``        — поиск треков (/search/music).
+        - ``search_youtube()``      — поиск видео YouTube (/search/youtube).
+        - ``search_chart()``        — чарт Deezer (/search/chart).
+        - ``get_track()``           — единый трек: инфо + скачивание одним вызовом.
 
     Требования окружения:
         ffmpeg и ffprobe в PATH (для HLS, merge, truncate, thumbnails).
@@ -95,6 +137,8 @@ class AnySaveClient:
         task_poll_interval_s: float = 1.0,
         task_max_poll_time_s: float = 900.0,
         task_create_timeout_s: float = 30.0,
+        search_timeout_s: float = 60.0,
+        search_max_retries: int = 2,
     ) -> None:
         self.api_base_url = (api_base_url or "").rstrip("/")
         self.download_dir = Path(download_dir) if download_dir is not None else Path.cwd()
@@ -106,6 +150,9 @@ class AnySaveClient:
         self.task_max_poll_time_s = float(task_max_poll_time_s)
         self.task_create_timeout_s = float(task_create_timeout_s)
         self.thumbnail_placeholder = thumbnail_placeholder
+        # Search API (spec §10 error_handling_guidelines: 429/502 → retry, max 3)
+        self.search_timeout_s = float(search_timeout_s)
+        self.search_max_retries = int(search_max_retries)
 
         self.max_concurrency = max(1, int(max_concurrency))
         self.concurrency_max_ttl_s = float(concurrency_max_ttl_s)
@@ -491,6 +538,231 @@ class AnySaveClient:
             remote=remote,
             max_file_size_bytes=max_file_size_bytes,
         )
+
+    # ─── Search API ──────────────────────────────────────────
+
+    async def search_music(
+        self,
+        query: str,
+        limit: int = 10,
+        cursor: str | None = None,
+    ) -> MusicSearchResponse:
+        """
+        Поиск треков: ``POST /search/music`` (Deezer → iTunes fallback).
+
+        Пустой результат — успешный ответ (200), а не ошибка.
+        Курсор — непрозрачная строка из предыдущего ``next_cursor``.
+
+        Args:
+            query:  Запрос (название, исполнитель или комбинация), 1..200 символов.
+            limit:  Максимум результатов на страницу, 1..25 (default 10).
+            cursor: Непрозрачный курсор следующей страницы.
+
+        Returns:
+            :class:`MusicSearchResponse`.
+
+        Raises:
+            ValueError:  локальная ошибка валидации query/limit/cursor.
+            SearchError: ошибка API (401/403/422/429/502) или сетевая ошибка.
+        """
+        return await fetch_music_search(
+            api_base_url=self.api_base_url,
+            query=query,
+            limit=limit,
+            cursor=cursor,
+            timeout_s=self.search_timeout_s,
+            api_token=self.api_token,
+            max_retries=self.search_max_retries,
+        )
+
+    async def search_youtube(
+        self,
+        query: str,
+        limit: int = 5,
+        cursor: str | None = None,
+    ) -> YoutubeSearchResponse:
+        """
+        Поиск видео: ``POST /search/youtube`` (yt-dlp flat-playlist).
+
+        Универсальный текстовый запрос. Для музыки удобно передавать
+        ``yt_query`` из :meth:`search_music` или переопределить запрос
+        под свой контекст (напр. добавить ``"official audio"``).
+
+        Пагинация в v1 не поддерживается — ``next_cursor`` всегда ``None``.
+
+        Args:
+            query:  Запрос, 1..300 символов.
+            limit:  Максимум результатов, 1..25 (default 5).
+            cursor: Зарезервировано для будущих версий.
+
+        Returns:
+            :class:`YoutubeSearchResponse`.
+
+        Raises:
+            ValueError:  локальная ошибка валидации query/limit/cursor.
+            SearchError: ошибка API (401/403/422/429/502) или сетевая ошибка.
+
+        Note:
+            Требует план ``lite``/``pro`` (права ``search.youtube``).
+        """
+        return await fetch_youtube_search(
+            api_base_url=self.api_base_url,
+            query=query,
+            limit=limit,
+            cursor=cursor,
+            timeout_s=self.search_timeout_s,
+            api_token=self.api_token,
+            max_retries=self.search_max_retries,
+        )
+
+    async def search_chart(
+        self,
+        limit: int = 10,
+        cursor: str | None = None,
+    ) -> MusicChartResponse:
+        """
+        Глобальный чарт Deezer: ``GET /search/chart``.
+
+        Args:
+            limit:   Максимум треков, 1..25 (default 10).
+            cursor:  Непрозрачный курсор следующей страницы.
+
+        Returns:
+            :class:`MusicChartResponse`.
+
+        Raises:
+            ValueError:  локальная ошибка валидации limit/cursor.
+            SearchError: ошибка API (401/403/422/429/502) или сетевая ошибка.
+        """
+        return await fetch_music_chart(
+            api_base_url=self.api_base_url,
+            limit=limit,
+            cursor=cursor,
+            timeout_s=self.search_timeout_s,
+            api_token=self.api_token,
+            max_retries=self.search_max_retries,
+        )
+
+    async def get_track(
+        self,
+        query: str | None = None,
+        *,
+        track: MusicSearchResult | None = None,
+        index: int = 0,
+        yt_query: str | None = None,
+        mode: str = "audio",
+        quality: str = "max",
+        use_cookies: bool = False,
+        max_file_size_mb: int | None = None,
+        _skip_cache: bool = False,
+    ) -> TrackResult:
+        """
+        Единый интерфейс: получить трек целиком — метаданные + скачивание.
+
+        Под капотом три шага:
+
+        1. **Метаданные** — ``POST /search/music`` (шаг пропускается,
+           если передан готовый ``track`` из :meth:`search_music` / :meth:`search_chart`).
+        2. **YouTube-видео** — ``POST /search/youtube`` по ``yt_query``
+           (fallback: ``"{artist} - {title}"``); кандидат — с длительностью,
+           ближайшей к длительности трека.
+        3. **Скачивание** — :meth:`download_via_tasks` (task pipeline —
+           стабильнее для YouTube; по умолчанию ``mode="audio"``).
+
+        Пустой поиск — не исключение: возвращается :class:`TrackResult` с
+        ``download.error.code = "no_results"`` (консистентно с темой
+        «пустой результат = 200, а не ошибка»).
+
+        Args:
+            query:  Текстовый запрос (1..200 символов). Ровно один из
+                    ``query`` / ``track`` обязателен.
+            track:  Готовый :class:`MusicSearchResult` — поиск музыки
+                    не выполняется.
+            index:  Какой результат выдачи брать, 0..24 (default 0).
+            yt_query:  Переопределить запрос для YouTube-поиска
+                       (по умолчанию — ``track.yt_query``).
+            mode:   ``"audio"`` (default) | ``"video"`` | ``"auto"`` —
+                    как в :meth:`download_via_tasks`.
+            quality: ``"max"`` (default) | ``"2160"`` ... | ``"360"``.
+            use_cookies: Серверные cookies для приватного контента.
+            max_file_size_mb: Лимит размера в MB (см. :meth:`download_via_tasks`).
+            _skip_cache: Принудительно пропустить Telegram cache lookup —
+                         вернуть локальные файлы даже при включённом
+                         ``prefer_telegram_cache``.
+
+        Returns:
+            :class:`TrackResult` — ``track`` + ``hit`` + ``download``.
+
+        Raises:
+            ValueError:  локальная валидация (query/track/index) — до HTTP.
+            SearchError: ошибка Search API (401/403/422/429/502) или сетевая.
+
+        Example::
+
+            got = await anysave.get_track("The Weeknd Blinding Lights")
+            if got.ok:
+                print(got.track.artist, got.track.title)
+                print(got.hit.url, got.files[0].path)
+            else:
+                print(got.error_msg)
+        """
+        if (query is None) == (track is None):
+            raise ValueError(
+                "get_track: pass exactly one of query (str) or track "
+                f"(MusicSearchResult), got query={query!r}, "
+                f"track={'given' if track is not None else None}"
+            )
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= 24:
+            raise ValueError(
+                f"index: must be an integer between 0 and 24, got {index!r}"
+            )
+
+        display = query if track is None else f"{track.artist} - {track.title}"
+
+        # 1) Метаданные: /search/music (или готовый track)
+        if track is None:
+            page = await self.search_music(query, limit=min(25, max(10, index + 1)))
+            if not page.results:
+                return TrackResult(
+                    query=display,
+                    download=_no_results_download(
+                        f"Music search returned no results for {display!r}"
+                    ),
+                )
+            if index >= len(page.results):
+                return TrackResult(
+                    query=display,
+                    download=_no_results_download(
+                        f"index={index} out of range: music search returned "
+                        f"{len(page.results)} result(s)"
+                    ),
+                )
+            track = page.results[index]
+
+        # 2) YouTube-кандидат: ближайший по длительности
+        search = yt_query or track.yt_query or f"{track.artist} - {track.title}"
+        hits = await self.search_youtube(search, limit=10)
+        if not hits.results:
+            return TrackResult(
+                query=display,
+                track=track,
+                download=_no_results_download(
+                    f"YouTube search returned no candidates for {search!r}"
+                ),
+            )
+        hit = _pick_closest_duration(track, hits.results)
+
+        # 3) Скачивание через task pipeline (стабильнее для YouTube,
+        #    не бросает исключений; _skip_cache уважается)
+        download = await self.download_via_tasks(
+            hit.url,
+            mode=mode,
+            quality=quality,
+            use_cookies=use_cookies,
+            max_file_size_mb=max_file_size_mb,
+            _skip_cache=_skip_cache,
+        )
+        return TrackResult(query=display, track=track, hit=hit, download=download)
 
     async def _process_remote_result_with_limit(
         self,

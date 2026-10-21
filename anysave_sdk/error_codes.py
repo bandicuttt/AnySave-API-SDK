@@ -64,6 +64,11 @@ class ClientErrorCode(str, Enum):
         TASK_RESULT_FAILED  — ошибка получения результата задачи.
         TASK_TIMEOUT        — задача не завершилась за ``task_max_poll_time_s``.
         TASK_DOWNLOAD_ERROR — задача завершилась, но скачивание файла упало.
+
+    **Единый трек (get_track)** — пустой результат поиска:
+
+        NO_RESULTS — поиск музыки/YouTube не вернул кандидатов
+                     (не исключение, а ``DownloadResult`` с этим кодом).
     """
 
     # ─── Конфигурация ────────────────────────────────────────
@@ -97,3 +102,6 @@ class ClientErrorCode(str, Enum):
     TASK_RESULT_FAILED = "task_result_failed"
     TASK_TIMEOUT = "task_timeout"
     TASK_DOWNLOAD_ERROR = "task_download_error"
+
+    # ─── Unified track (get_track) ────────────────────────────
+    NO_RESULTS = "no_results"

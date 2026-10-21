@@ -48,6 +48,50 @@ python examples/quick_start.py
 
 ---
 
+### `search_music.py` — поиск музыки
+
+`search_music()` → `POST /search/music` (Deezer → iTunes fallback).
+Пагинация через непрозрачный `next_cursor`, мост в YouTube-поиск через `yt_query`.
+
+```bash
+python examples/search_music.py
+```
+
+---
+
+### `search_youtube.py` — поиск видео YouTube
+
+`search_youtube()` → `POST /search/youtube` (yt-dlp). Любой текстовый запрос —
+уроки, влоги, музыка. Требует план `lite`/`pro` (права `search.youtube`).
+
+```bash
+python examples/search_youtube.py
+```
+
+---
+
+### `search_chart.py` — глобальный чарт Deezer
+
+`search_chart()` → `GET /search/chart`. Глобальный чарт. Пагинация — через `cursor`.
+
+```bash
+python examples/search_chart.py
+```
+
+---
+
+### `get_track.py` — трек целиком одним вызовом
+
+`get_track()` → `/search/music` → `/search/youtube` → `download_via_tasks(mode="audio")`.
+Возвращает единый `TrackResult`: метаданные трека + выбранное видео + файлы.
+Лучший YouTube-кандидат выбирается по ближайшей длительности.
+
+```bash
+python examples/get_track.py
+```
+
+---
+
 ### `aiogram3_basic.py` — базовый бот (рекомендуется)
 
 Бот на aiogram 3. Команда `/download <url>` или просто URL.
@@ -107,5 +151,8 @@ python examples/aiogram2_basic.py
 Повторные запросы одного URL   → smart_download() + кэш aiogram3_cached.py
 Только ссылки, без скачивания  → get_remote_links()     aiogram3_links_only.py
 YouTube 4K / тяжёлые VOD      → download_via_tasks()    aiogram3_tasks.py
+Поиск треков / чартов         → search_music/chart()    search_music.py, search_chart.py
+Поиск видео YouTube           → search_youtube()        search_youtube.py
+Трек целиком (инфо + файл)    → get_track()             get_track.py
 Проект на aiogram 2            → smart_download()       aiogram2_basic.py
 ```

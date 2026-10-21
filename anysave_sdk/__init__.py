@@ -33,11 +33,15 @@ Full configuration::
         task_poll_interval_s=2.0,
         task_max_poll_time_s=600.0,
         task_create_timeout_s=15.0,
+        search_timeout_s=60.0,
+        search_max_retries=2,
     )
 """
 
+from anysave_sdk.download_pipeline import DownloadPipeline
 from anysave_sdk.downloader import AnySaveClient
 from anysave_sdk.error_codes import ClientErrorCode
+from anysave_sdk.exceptions import SearchError
 from anysave_sdk.models import (
     CachedDestinationInfo,
     CachedFileInfo,
@@ -48,12 +52,18 @@ from anysave_sdk.models import (
     DownloadedFile,
     DownloadResult,
     DownloadStatus,
+    MusicChartResponse,
+    MusicSearchResponse,
+    MusicSearchResult,
     RemoteDownloadResult,
     RemoteFile,
     TaskCreateResult,
     TaskStatusResult,
+    TrackResult,
+    YoutubeSearchHit,
+    YoutubeSearchResponse,
 )
-from anysave_sdk.download_pipeline import DownloadPipeline
+from anysave_sdk.utils import fmt_duration, fmt_size
 
 __all__ = [
     "AnySaveClient",
@@ -67,9 +77,18 @@ __all__ = [
     "DownloadedFile",
     "DownloadResult",
     "DownloadStatus",
+    "MusicChartResponse",
+    "MusicSearchResponse",
+    "MusicSearchResult",
     "RemoteDownloadResult",
     "RemoteFile",
+    "SearchError",
     "TaskCreateResult",
     "TaskStatusResult",
+    "TrackResult",
+    "YoutubeSearchHit",
+    "YoutubeSearchResponse",
     "DownloadPipeline",
+    "fmt_duration",
+    "fmt_size",
 ]

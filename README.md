@@ -12,7 +12,7 @@
 
 [Website](https://anysave.click) • [API Docs](https://anysave.click/docs) • [Playground](https://anysave.click/docs/playground) • [Get API key](https://anysave.click)
 
-[Установка](#установка) • [Быстрый старт](#быстрый-старт) • [Методы](#методы) • [Примеры](#примеры) • [Конфигурация](#конфигурация) • [Обработка ошибок](#обработка-ошибок)
+[Установка](#установка) • [Быстрый старт](#быстрый-старт) • [Методы](#методы) • [Поиск](#поиск-music--youtube--chart) • [Примеры](#примеры) • [Конфигурация](#конфигурация) • [Обработка ошибок](#обработка-ошибок)
 
 </div>
 
@@ -25,6 +25,7 @@
 - **Защита процесса** — глобальный limiter ограничивает число одновременно выполняемых local `/links` задач
 - **Telegram-ready** — cache lookup, truncate под 50 MB, thumbnails
 - **HLS / merge / resume** — SDK берёт на себя ffmpeg, split video+audio, дозагрузку
+- **Search API** — поиск треков (`search_music`), видео YouTube (`search_youtube`), чарты Deezer (`search_chart`) и единый `get_track()` — инфо + скачивание одним вызовом
 - **Typed** — полная поддержка mypy / pyright
 
 ```python
@@ -103,6 +104,10 @@ asyncio.run(main())
 | `download_via_tasks()` | Явный task pipeline для долгих / тяжёлых задач | `POST /downloader/tasks` + polling |
 | `download()` | Sync endpoint. Сервер скачивает и обрабатывает файл | `POST /downloader/` |
 | `get_remote_links()` | CDN-ссылки без скачивания | `POST /downloader/links` |
+| `search_music()` | Поиск треков: Deezer → iTunes fallback, пагинация cursor'ом | `POST /search/music` |
+| `search_youtube()` | Поиск видео YouTube (любой текст, план `lite`/`pro`) | `POST /search/youtube` |
+| `search_chart()` | Чарт Deezer: глобальный (`"0"`) или по стране (`"us"`) | `GET /search/chart` |
+| `get_track()` | **Единый трек:** метаданные → YouTube → скачивание одним вызовом | `/search/*` + `/downloader/tasks` |
 
 ### `smart_download()`
 
@@ -166,6 +171,10 @@ result = await anysave.download_via_tasks(
 | Файл | Описание |
 |---|---|
 | [`quick_start.py`](examples/quick_start.py) | Минимальный скрипт — 20 строк, без Telegram |
+| [`search_music.py`](examples/search_music.py) | Поиск музыки + пагинация + мост в YouTube |
+| [`search_youtube.py`](examples/search_youtube.py) | Поиск видео YouTube (уроки, влоги, музыка) |
+| [`search_chart.py`](examples/search_chart.py) | Чарты Deezer (глобальный / по стране) |
+| [`get_track.py`](examples/get_track.py) | Трек целиком одним вызовом: инфо + YouTube + файл |
 | [`aiogram3_basic.py`](examples/aiogram3_basic.py) | Бот на aiogram 3 с `smart_download()` |
 | [`aiogram3_cached.py`](examples/aiogram3_cached.py) | Бот с Telegram cache (`file_id` повторно) |
 | [`aiogram3_links_only.py`](examples/aiogram3_links_only.py) | Бот с CDN-ссылками (без disk space) |
@@ -192,6 +201,61 @@ result = await anysave.download_via_tasks(
 | Rutube | ✅ | — | — | — |
 | OK.ru | ✅ | — | — | — |
 | Snapchat | ✅ | — | ✅ | — |
+
+---
+
+## Поиск (music / youtube / chart)
+
+Единый envelope, прозрачная авторизация, типизированные модели и ретраи
+429/502 (уважаем `Retry-After`, до 3 попыток) — всё в SDK.
+
+```python
+from anysave_sdk import AnySaveClient, SearchError, fmt_duration
+
+anysave = AnySaveClient(api_base_url="https://api.anysave.click", api_token="YOUR_TOKEN")
+
+# 1) Музыка: Deezer → iTunes fallback
+page = await anysave.search_music("The Weeknd Blinding Lights", limit=10)
+for t in page.results:
+    print(t.artist, t.title, fmt_duration(t.duration_seconds), t.source)
+
+# Пагинация: next_cursor — непрозрачная строка, только передавать как есть
+while page.has_more:
+    page = await anysave.search_music("rock", limit=10, cursor=page.next_cursor)
+    ...
+
+# 2) YouTube: готовый мост из музыкального поиска (или свой запрос)
+yt = await anysave.search_youtube(page.results[0].yt_query, limit=5)
+print(yt.results[0].url, yt.results[0].video_id)
+
+# 3) Глобальный чарт Deezer
+chart = await anysave.search_chart(limit=25)
+
+# 4) Единый трек: метаданные → YouTube → скачивание (mode="audio",
+#    download_via_tasks; _skip_cache=True — принудительно в обход Telegram-кэша)
+got = await anysave.get_track("The Weeknd Blinding Lights", _skip_cache=True)
+if got.ok:
+    print(got.track.artist, got.hit.url, got.files[0].path)
+else:
+    print(got.error_msg)  # пустой поиск → код no_results, не исключение
+```
+
+Особенности:
+
+- **Пустой результат — это 200, а не ошибка.** Проверяйте `page.is_empty`.
+- **`duration` всегда в секундах** (`duration_seconds`), форматируйте через `fmt_duration()`.
+- **Даты:** у музыки `release_date` в ISO 8601 (`YYYY-MM-DD`), у YouTube `upload_date` — `YYYYMMDD`.
+- **`search_youtube()`** — права `search.youtube` доступны на планах `lite`/`pro`.
+- **Лимиты:** 60 rpm для music/chart, 15 rpm для youtube.
+- **Ошибки** — `SearchError` с `code` / `detail` / `retry_after` (см. [обработка ошибок](#обработка-ошибок)).
+- **`get_track()`** — один вызов вместо связки search_music → search_youtube →
+  download_via_tasks: возвращает `TrackResult` (трек + видео + файлы); пустой
+  поиск — `download.error.code = "no_results"`, а не исключение.
+
+Полные примеры: [`examples/search_music.py`](examples/search_music.py),
+[`examples/search_youtube.py`](examples/search_youtube.py),
+[`examples/search_chart.py`](examples/search_chart.py),
+[`examples/get_track.py`](examples/get_track.py).
 
 ---
 
@@ -244,6 +308,8 @@ anysave = AnySaveClient(
 | `task_poll_interval_s` | `float` | `1.0` | Интервал опроса задачи |
 | `task_max_poll_time_s` | `float` | `900.0` | Максимум ожидания задачи |
 | `task_create_timeout_s` | `float` | `30.0` | Таймаут создания задачи |
+| `search_timeout_s` | `float` | `60.0` | Таймаут запросов Search API (`search_*`) |
+| `search_max_retries` | `int` | `2` | Ретраев 429/502 в Search API (до 3 попыток) |
 | `thumbnail_placeholder` | `str \| None` | `None` | Путь к заглушке thumbnail |
 
 </details>
@@ -311,6 +377,43 @@ if not result.ok:
 > `client_busy` и `local_processing_failed` чаще всего видны при прямом вызове `download_links()`.  
 > В `smart_download()` эти состояния обычно приводят к автоматическому fallback в `download_via_tasks()`.
 
+### SearchError — ошибки Search API
+
+`search_music()`, `search_youtube()` и `search_chart()` бросают `SearchError`
+(остальные методы возвращают `DownloadResult` c `error_msg`):
+
+```python
+from anysave_sdk import SearchError
+
+try:
+    page = await anysave.search_music("The Weeknd")
+except SearchError as e:
+    print(e.code)         # машиночитаемый код
+    print(e.detail)       # человекочитаемое описание (str | None)
+    print(e.status)       # HTTP-статус (int | None)
+    print(e.retry_after)  # секунды до сброса лимита (при 429)
+    print(e.extra)        # доп. данные из envelope (field errors при 422)
+```
+
+429/502 SDK ретраит сам (с backoff, до 3 попыток) — `SearchError` приходит,
+когда ретраи исчерпаны. `rate_limit_exceeded`, `validation_error`,
+`insufficient_usage_tokens` и `bad_request` — терминальные, их ретраить не нужно.
+
+> `get_track()` при пустом поиске не бросает `SearchError` — он возвращает
+> `TrackResult` с `download.error.code = "no_results"` (код `ClientErrorCode`,
+> не Search API). `SearchError` из поиска внутри `get_track()` пробрасывается как обычно.
+
+| Код | Когда |
+|---|---|
+| `unauthorized` | HTTP 401 — неверный токен |
+| `subscription_required` / `access_forbidden` | Тариф не поддерживает эндпоинт |
+| `insufficient_usage_tokens` | Закончились usage-токены |
+| `validation_error` | 422 — невалидные параметры (см. `extra`) |
+| `rate_limit_exceeded` | HTTP 429 — лимит запросов |
+| `music_provider_failed` / `youtube_search_failed` | 502 — апстрим недоступен после ретраев |
+| `chart_unavailable` | 502 — чарт недоступен (fallback нет) |
+| `api_timeout` / `api_connect_error` | Таймаут / сетевая ошибка SDK |
+
 ---
 
 ## Модели данных
@@ -370,6 +473,69 @@ remote.audio                      # RemoteFile | None (split audio)
 remote.files[0].url               # CDN URL
 remote.files[0].is_hls_manifest   # True если .m3u8 или .mpd
 remote.files[0].filename
+```
+
+</details>
+
+<details>
+<summary><strong>MusicSearchResult</strong> / <strong>YoutubeSearchHit</strong></summary>
+
+```python
+# MusicSearchResult — /search/music и /search/chart
+t.id                  # str (Deezer int / iTunes int нормализуются в str)
+t.title, t.artist, t.album
+t.duration_seconds    # float | None (в СЕКУНДАХ → fmt_duration())
+t.cover_url_small / t.cover_url_medium / t.cover_url_big
+t.preview_url         # 30s preview (только Deezer)
+t.release_date        # "YYYY-MM-DD"
+t.is_explicit         # bool
+t.source              # "deezer" | "itunes"
+t.is_deezer, t.is_itunes
+t.yt_query            # готовый запрос для search_youtube()
+t.source_url
+
+# YoutubeSearchHit — /search/youtube
+hit.url                # https://www.youtube.com/watch?v=<ID>
+hit.video_id           # <ID>, парсится из url
+hit.title, hit.channel
+hit.duration_seconds   # float | None (в СЕКУНДАХ)
+hit.view_count         # int | None
+hit.thumbnail_url
+hit.upload_date        # "YYYYMMDD" (формат YouTube)
+```
+
+</details>
+
+<details>
+<summary><strong>MusicSearchResponse</strong> / <strong>YoutubeSearchResponse</strong></summary>
+
+```python
+page.results        # list[MusicSearchResult] | list[YoutubeSearchHit]
+page.total_results  # int — только у /search/music и /chart
+page.next_cursor    # str | None — непрозрачный курсор (передавать как есть)
+page.query          # echo исходного запроса
+page.has_more       # bool
+page.is_empty       # bool — пустой список == 200 OK, не ошибка
+
+chart = await anysave.search_chart()
+chart.country       # echo кода страны ("0" = глобальный)
+```
+
+</details>
+
+<details>
+<summary><strong>TrackResult</strong> — единый результат <code>get_track()</code></summary>
+
+```python
+got = await anysave.get_track("The Weeknd Blinding Lights")
+got.ok           # True: трек найден и файлы скачаны
+got.query        # исходный запрос
+got.track        # MusicSearchResult | None — метаданные
+got.hit          # YoutubeSearchHit | None — выбранное видео
+got.download     # DownloadResult — заполнен всегда
+got.files        # shortcut к download.files
+got.is_cached    # результат из Telegram-кэша
+got.error_msg    # str | None (пустой поиск → no_results)
 ```
 
 </details>

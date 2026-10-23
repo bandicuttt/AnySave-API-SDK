@@ -35,7 +35,9 @@ from anysave_sdk.models import (
 )
 from anysave_sdk.postprocessing import (
     download_hls_stream,
+    download_hls_via_cdn,
     enrich_media_metadata,
+    fetch_hls_manifest,
     fix_container,
     merge_video_audio,
     truncate_file,
@@ -306,17 +308,46 @@ class DownloadPipeline:
         api_file = _remote_to_api_file(remote_file)
         headers = build_download_headers(api_file)
 
-        logger.info(
-            "Downloading HLS: %s → %s",
-            remote_file.url[:120], dest.name,
+        # extra.processing.base_url: манифест отдаёт relay, а сегменты живут
+        # на CDN (okcdn) — резолвим относительные URI против base_url и качаем
+        # сегменты напрямую с CDN с теми же заголовками (без UA okcdn 400-ит).
+        processing = remote_file.extra.processing if remote_file.extra else None
+        base_url = (
+            processing.base_url
+            if processing is not None and processing.is_hls_manifest
+            else None
         )
 
-        ok = await download_hls_stream(
-            manifest_url=remote_file.url,
-            output_path=dest,
-            timeout_seconds=self.download_timeout_s,
-            headers=headers,
-        )
+        input_url: str = remote_file.url
+
+        if base_url:
+            # ffmpeg при локальном плейлисте не пробрасывает -user_agent/-headers
+            # в сегментные запросы (шлёт Lavf/* → okcdn 400), поэтому сегменты
+            # качает сам SDK (httpx с заголовками), ffmpeg только ремуксит.
+            ok = await download_hls_via_cdn(
+                manifest_url=remote_file.url,
+                base_url=base_url,
+                headers=headers,
+                output_path=dest,
+                timeout_seconds=self.download_timeout_s,
+            )
+            if ok:
+                logger.info("HLS downloaded via CDN segments")
+            else:
+                logger.warning(
+                    "HLS via CDN failed, falling back to direct ffmpeg | %s",
+                    remote_file.url[:120],
+                )
+        else:
+            ok = False
+
+        if not ok:
+            ok = await download_hls_stream(
+                manifest_url=input_url,
+                output_path=dest,
+                timeout_seconds=self.download_timeout_s,
+                headers=headers,
+            )
 
         if not ok:
             safe_unlink(dest)

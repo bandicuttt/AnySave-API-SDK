@@ -50,8 +50,53 @@ class FileMediaMetadata(BaseModel):
     thumbnail: str | None = None
 
 
+class ExtraProcessingHint(BaseModel):
+    """
+    Подсказка сервера о том, как обрабатывать файл (контракт extra.processing).
+
+    Attributes:
+        version: Версия контракта (сейчас ``1``). Незнакомые kind/version
+                 клиент обязан игнорировать — обратная совместимость.
+        kind:    Тип обработки. ``"hls_manifest"`` — URL это HLS-манифест,
+                 заголовки обязательны и для вариант-плейлистов, и для сегментов.
+        headers: Заголовки, которые нужно пробрасывать при скачивании
+                 манифеста, плейлистов и сегментов (User-Agent, Referer...).
+        base_url: Оригинальный URL плейлиста на CDN (например okcdn).
+                  Если задан — относительные URI внутри плейлиста
+                  (вариант-плейлисты, сегменты) резолвятся против него,
+                  а не против URL, по которому манифест был получен
+                  (это может быть relay-URL). Клиент скачивает манифест
+                  сам, переписывает URI и качает сегменты напрямую с CDN.
+        note:    Человекочитаемое пояснение от сервера.
+
+    Example::
+
+        {
+            "extra": {
+                "processing": {
+                    "version": 1,
+                    "kind": "hls_manifest",
+                    "headers": {"User-Agent": "...", "Referer": "https://ok.ru/"},
+                    "note": "HLS-манифест okcdn.ru"
+                }
+            }
+        }
+    """
+    version: int = 1
+    kind: str
+    headers: dict[str, str] = {}
+    base_url: str | None = None
+    note: str | None = None
+
+    @property
+    def is_hls_manifest(self) -> bool:
+        """Известный ли это hint, который клиент умеет обрабатывать."""
+        return self.kind == "hls_manifest"
+
+
 class ApiFileExtra(BaseModel):
     metadata: FileMediaMetadata | None = None
+    processing: ExtraProcessingHint | None = None
 
 
 class DownloadedFileExtra(BaseModel):
@@ -343,9 +388,18 @@ class RemoteFile(BaseModel):
 
     @property
     def is_hls_manifest(self) -> bool:
-        """Является ли URL HLS/DASH манифестом."""
+        """
+        Является ли URL HLS/DASH манифестом.
+
+        ``True`` если URL оканчивается на ``.m3u8``/``.mpd`` ИЛИ сервер
+        прислал ``extra.processing.kind == "hls_manifest"`` (парсер okru
+        может отдать манифест с URL без расширения).
+        """
         path = self.url.split("?", 1)[0].lower()
-        return path.endswith(".m3u8") or path.endswith(".mpd")
+        if path.endswith(".m3u8") or path.endswith(".mpd"):
+            return True
+        processing = self.extra.processing if self.extra else None
+        return processing is not None and processing.is_hls_manifest
 
     @property
     def is_video(self) -> bool:

@@ -33,6 +33,19 @@ class IncompleteDownloadError(Exception):
         )
 
 
+class FileSizeLimitExceededError(Exception):
+    """Файл превысил max_file_size и его нельзя безопасно обрезать до целого."""
+
+    def __init__(self, filename: str, file_size_bytes: int, max_size_bytes: int):
+        self.filename = filename
+        self.file_size_bytes = file_size_bytes
+        self.max_size_bytes = max_size_bytes
+        super().__init__(
+            f"File too large and not safely truncatable: {filename} "
+            f"({file_size_bytes} bytes > limit {max_size_bytes} bytes)"
+        )
+
+
 class ConcurrencyLimitTimeoutError(Exception):
     """Не удалось дождаться свободного слота локальной обработки."""
 

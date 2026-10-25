@@ -92,6 +92,7 @@ class ClientErrorCode(str, Enum):
     # ─── Download ────────────────────────────────────────────
     UNKNOWN_RESPONSE = "unknown_response"
     SOME_DOWNLOADS_FAILED = "some_downloads_failed"
+    FILE_TOO_LARGE = "file_to_large"
 
     # ─── Cache lookup ────────────────────────────────────────
     CACHE_LOOKUP_FAILED = "cache_lookup_failed"

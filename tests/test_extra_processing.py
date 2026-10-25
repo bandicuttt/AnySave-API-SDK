@@ -30,6 +30,7 @@ from anysave_sdk.headers import build_download_headers  # noqa: E402
 from anysave_sdk.models import (  # noqa: E402
     ApiFile,
     ApiFileExtra,
+    DownloadStatus,
     ExtraProcessingHint,
     RemoteFile,
 )
@@ -189,7 +190,7 @@ def test_hls_download_receives_server_headers():
 
     captured: dict = {}
 
-    async def fake_hls(manifest_url, output_path, timeout_seconds=900.0, headers=None):
+    async def fake_hls(manifest_url, output_path, timeout_seconds=900.0, headers=None, **kwargs):
         captured["url"] = manifest_url
         captured["headers"] = headers
         output_path.write_bytes(b"\x00" * 2048)
@@ -230,7 +231,7 @@ def test_direct_download_uses_processing_headers_for_hls_route():
 
     called = {"hls": False}
 
-    async def fake_hls(manifest_url, output_path, timeout_seconds=900.0, headers=None):
+    async def fake_hls(manifest_url, output_path, timeout_seconds=900.0, headers=None, **kwargs):
         called["hls"] = True
         output_path.write_bytes(b"\x00" * 2048)
         return True
@@ -439,7 +440,7 @@ def test_hls_download_uses_cdn_segments_with_base_url():
     captured: dict = {}
 
     async def fake_cdn(manifest_url, base_url, headers, output_path,
-                       timeout_seconds=900.0, max_concurrent=4):
+                       timeout_seconds=900.0, max_concurrent=4, **kwargs):
         captured["manifest_url"] = manifest_url
         captured["base_url"] = base_url
         captured["headers"] = headers
@@ -482,10 +483,10 @@ def test_hls_download_base_url_fallback_when_fetch_fails():
         return None
 
     async def fake_cdn(manifest_url, base_url, headers, output_path,
-                       timeout_seconds=900.0, max_concurrent=4):
+                       timeout_seconds=900.0, max_concurrent=4, **kwargs):
         return False  # манифест не скачался
 
-    async def fake_hls(manifest_url, output_path, timeout_seconds=900.0, headers=None):
+    async def fake_hls(manifest_url, output_path, timeout_seconds=900.0, headers=None, **kwargs):
         captured["ffmpeg_input"] = manifest_url
         output_path.write_bytes(b"\x00" * 2048)
         return True
@@ -523,7 +524,7 @@ def test_hls_download_without_base_url_unchanged():
 
     captured: dict = {}
 
-    async def fake_hls(manifest_url, output_path, timeout_seconds=900.0, headers=None):
+    async def fake_hls(manifest_url, output_path, timeout_seconds=900.0, headers=None, **kwargs):
         captured["ffmpeg_input"] = manifest_url
         output_path.write_bytes(b"\x00" * 2048)
         return True
@@ -539,6 +540,118 @@ def test_hls_download_without_base_url_unchanged():
 
     assert got is not None
     assert captured["ffmpeg_input"] == rf.url
+
+
+def test_hls_file_returns_none_when_limit_and_truncate_impossible():
+    """HLS файл, который нельзя обрезать до валидного, → file_to_large (None)."""
+    import tempfile
+
+    tmp_path = Path(tempfile.mkdtemp())
+    pipeline = make_pipeline(tmp_path)
+    rf = RemoteFile(
+        type="video",
+        url="https://vdok.mycdn.me/getVideo?sig=x",
+        filename="okru_x.m3u8",
+    )
+
+    async def fake_hls(manifest_url, output_path, timeout_seconds=900.0, headers=None, **kwargs):
+        assert kwargs.get("max_size_bytes") == 100
+        output_path.write_bytes(b"\x00" * 4096)
+        return True
+
+    async def fake_truncate(filepath, max_size_bytes):
+        # Обрезка не удалась: файл остаётся большим.
+        return filepath, False
+
+    async def fake_enrich(**kwargs):
+        return None
+
+    with (
+        mock.patch("anysave_sdk.download_pipeline.download_hls_stream", new=fake_hls),
+        mock.patch("anysave_sdk.download_pipeline.truncate_file", new=fake_truncate),
+        mock.patch("anysave_sdk.download_pipeline.enrich_media_metadata", new=fake_enrich),
+    ):
+        got = asyncio.run(pipeline._download_hls_file(rf, tmp_path / "out.mp4", 100))
+
+    assert got is None
+    assert not (tmp_path / "out.mp4").exists()
+
+
+def test_finalize_single_file_file_to_large_error():
+    """_finalize_single_file: необрезаемый oversized файл → ERROR file_to_large."""
+    import tempfile
+
+    tmp_path = Path(tempfile.mkdtemp())
+    pipeline = make_pipeline(tmp_path)
+    dest = tmp_path / "big.mp4"
+    dest.write_bytes(b"\x00" * 4096)
+    rf = RemoteFile(type="video", url="https://x/v.mp4", filename="v.mp4")
+
+    async def fake_truncate(filepath, max_size_bytes):
+        return filepath, False
+
+    async def fake_enrich(**kwargs):
+        return None
+
+    with (
+        mock.patch("anysave_sdk.download_pipeline.truncate_file", new=fake_truncate),
+        mock.patch("anysave_sdk.download_pipeline.enrich_media_metadata", new=fake_enrich),
+    ):
+        result = asyncio.run(pipeline._finalize_single_file(dest, rf, 100, False))
+
+    assert result.status == DownloadStatus.ERROR
+    assert result.error is not None
+    assert result.error.code == "file_to_large"
+    assert result.files == []
+    assert not dest.exists()
+
+
+def test_stream_via_httpx_cuts_at_limit():
+    """Direct-стрим рубится на лимите: файл ≤ ~limit, скачивание успешно."""
+    import tempfile
+
+    tmp_path = Path(tempfile.mkdtemp())
+    pipeline = make_pipeline(tmp_path)
+    dest = tmp_path / "v.mp4"
+
+    class FakeResp:
+        status_code = 200
+
+        def aiter_bytes(self, chunk_size):
+            async def gen():
+                for _ in range(100):
+                    yield b"x" * chunk_size
+            return gen()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, method, url, headers=None):
+            return FakeResp()
+
+    real_httpx = sys.modules["httpx"]
+    orig_async_client = real_httpx.AsyncClient
+    real_httpx.AsyncClient = FakeClient
+    try:
+        ok = asyncio.run(pipeline._stream_via_httpx("https://x/v.mp4", dest, {}, 1024))
+    finally:
+        real_httpx.AsyncClient = orig_async_client
+
+    assert ok
+    assert 0 < dest.stat().st_size <= 2 * 1024  # один chunk поверх лимита максимум
 
 
 def _run_all() -> int:

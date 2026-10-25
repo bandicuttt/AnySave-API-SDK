@@ -109,10 +109,10 @@ async def download_stream(
     was_cut = False
     dl_start = time.monotonic()
 
-    content_length = stream.content_length
-    if max_size_bytes and content_length and content_length <= max_size_bytes:
-        max_size_bytes = None
-
+    # Лимит работает всегда: рубим стрим на лимите, целостность добирает
+    # пост-обработка (fix_container / truncate_file). Если Content-Length
+    # известен и больше лимита — всё равно качаем до лимита и обрезаем:
+    # пользователь получает валидный обрезанный файл, а не ошибку.
     async with aiofiles.open(dest, mode="wb") as f:
         async for chunk in stream.iter_chunks(chunk_size):
             await f.write(chunk)

@@ -22,6 +22,7 @@ import httpx
 
 from anysave_sdk.api import extract_files, extract_remote_files, make_api_error_result
 from anysave_sdk.error_codes import ClientErrorCode
+from anysave_sdk.exceptions import FileSizeLimitExceededError
 from anysave_sdk.headers import build_download_headers
 from anysave_sdk.models import (
     ApiFile,
@@ -330,6 +331,7 @@ class DownloadPipeline:
                 headers=headers,
                 output_path=dest,
                 timeout_seconds=self.download_timeout_s,
+                max_size_bytes=max_file_size_bytes,
             )
             if ok:
                 logger.info("HLS downloaded via CDN segments")
@@ -347,6 +349,7 @@ class DownloadPipeline:
                 output_path=dest,
                 timeout_seconds=self.download_timeout_s,
                 headers=headers,
+                max_size_bytes=max_file_size_bytes,
             )
 
         if not ok:
@@ -359,6 +362,17 @@ class DownloadPipeline:
         if max_file_size_bytes and file_size > max_file_size_bytes:
             dest, was_truncated = await truncate_file(dest, max_file_size_bytes)
             file_size = dest.stat().st_size if dest.exists() else 0
+            if file_size > max_file_size_bytes:
+                # Обрезка не удалась (не ремуксится / не целое) — не отдаём
+                # гигантский битый файл, а честно признаём file_to_large.
+                logger.warning(
+                    "HLS file exceeds size limit and cannot be truncated, "
+                    "failing | file=%s size=%s limit=%s",
+                    dest.name, fmt_size(file_size),
+                    fmt_size(max_file_size_bytes),
+                )
+                safe_unlink(dest)
+                return None
 
         final_type = map_type(remote_file.type)
         media_metadata = await enrich_media_metadata(
@@ -405,8 +419,12 @@ class DownloadPipeline:
 
         try:
             video_ok, audio_ok = await asyncio.gather(
-                self._download_single_stream(video_remote, video_dest),
-                self._download_single_stream(audio_remote, audio_dest),
+                self._download_single_stream(
+                    video_remote, video_dest, max_file_size_bytes,
+                ),
+                self._download_single_stream(
+                    audio_remote, audio_dest, max_file_size_bytes,
+                ),
             )
 
             if not video_ok:
@@ -494,6 +512,7 @@ class DownloadPipeline:
         self,
         remote_file: RemoteFile,
         dest: Path,
+        max_file_size_bytes: int | None = None,
     ) -> bool:
         """
         Скачивает один stream (video или audio): direct или HLS.
@@ -511,6 +530,7 @@ class DownloadPipeline:
                     output_path=dest,
                     timeout_seconds=self.download_timeout_s,
                     headers=headers,
+                    max_size_bytes=max_file_size_bytes,
                 )
                 if not ok:
                     safe_unlink(dest)
@@ -524,15 +544,20 @@ class DownloadPipeline:
                 return False
 
         # Direct URL: aiohttp → httpx fallback
-        if await self._stream_via_aiohttp(remote_file.url, dest, headers):
+        if await self._stream_via_aiohttp(
+            remote_file.url, dest, headers, max_size_bytes=max_file_size_bytes,
+        ):
             return True
-        return await self._stream_via_httpx(remote_file.url, dest, headers)
+        return await self._stream_via_httpx(
+            remote_file.url, dest, headers, max_size_bytes=max_file_size_bytes,
+        )
 
     async def _stream_via_aiohttp(
         self,
         url: str,
         dest: Path,
         headers: dict[str, str],
+        max_size_bytes: int | None = None,
     ) -> bool:
         """Скачивает поток через aiohttp. Returns True при успехе."""
         try:
@@ -545,14 +570,24 @@ class DownloadPipeline:
                         return False
 
                     bytes_written = 0
+                    cut_by_limit = False
                     async with aiofiles.open(dest, "wb") as f:
                         async for chunk in resp.content.iter_chunked(self.chunk_size):
                             await f.write(chunk)
                             bytes_written += len(chunk)
+                            if max_size_bytes and bytes_written >= max_size_bytes:
+                                cut_by_limit = True
+                                break
 
             if not dest.exists() or dest.stat().st_size < 100:
                 safe_unlink(dest)
                 return False
+
+            if cut_by_limit:
+                logger.info(
+                    "aiohttp stream cut at size limit: %s (limit %s)",
+                    dest.name, fmt_size(max_size_bytes),
+                )
 
             logger.debug(
                 "aiohttp stream ok: %s (%s)",
@@ -573,6 +608,7 @@ class DownloadPipeline:
         url: str,
         dest: Path,
         headers: dict[str, str],
+        max_size_bytes: int | None = None,
     ) -> bool:
         """Скачивает поток через httpx (fallback). Returns True при успехе."""
         try:
@@ -584,13 +620,25 @@ class DownloadPipeline:
                     if resp.status_code < 200 or resp.status_code >= 300:
                         return False
 
+                    bytes_written = 0
+                    cut_by_limit = False
                     async with aiofiles.open(dest, "wb") as f:
                         async for chunk in resp.aiter_bytes(self.chunk_size):
                             await f.write(chunk)
+                            bytes_written += len(chunk)
+                            if max_size_bytes and bytes_written >= max_size_bytes:
+                                cut_by_limit = True
+                                break
 
             if not dest.exists() or dest.stat().st_size < 100:
                 safe_unlink(dest)
                 return False
+
+            if cut_by_limit:
+                logger.info(
+                    "httpx stream cut at size limit: %s (limit %s)",
+                    dest.name, fmt_size(max_size_bytes),
+                )
 
             logger.info(
                 "httpx stream ok (fallback): %s (%s)",
@@ -650,6 +698,26 @@ class DownloadPipeline:
         if max_file_size_bytes and file_size > max_file_size_bytes:
             dest, was_truncated = await truncate_file(dest, max_file_size_bytes)
             file_size = dest.stat().st_size if dest.exists() else 0
+            if file_size > max_file_size_bytes:
+                logger.warning(
+                    "File exceeds size limit and cannot be truncated, "
+                    "failing | file=%s size=%s limit=%s",
+                    dest.name, fmt_size(file_size),
+                    fmt_size(max_file_size_bytes),
+                )
+                safe_unlink(dest)
+                return DownloadResult(
+                    status=DownloadStatus.ERROR,
+                    files=[],
+                    error=ClientError(
+                        code=ClientErrorCode.FILE_TOO_LARGE.value,
+                        detail=(
+                            f"{dest.name}: {fmt_size(file_size)} exceeds limit "
+                            f"{fmt_size(max_file_size_bytes)} and cannot be "
+                            "truncated to a valid file"
+                        ),
+                    ),
+                )
 
         final_type = map_type(remote_file.type)
         media_metadata = await enrich_media_metadata(
@@ -746,7 +814,11 @@ class DownloadPipeline:
         max_file_size_bytes: int | None,
     ) -> DownloadedFile | None:
         """Одна попытка скачивания. Returns DownloadedFile или None."""
-        from anysave_sdk.exceptions import IncompleteDownloadError, SlowDownloadError
+        from anysave_sdk.exceptions import (
+            FileSizeLimitExceededError,
+            IncompleteDownloadError,
+            SlowDownloadError,
+        )
 
         dl_start = time.monotonic()
         try:
@@ -766,6 +838,18 @@ class DownloadPipeline:
                 dest, file, bytes_downloaded, was_cut,
                 is_truncated, max_file_size_bytes,
             )
+
+        except FileSizeLimitExceededError as e:
+            # Обрезка до валидного файла невозможна — file_to_large,
+            # файл не отдаём.
+            logger.warning(
+                "File too large, cannot truncate to valid file | "
+                "file=%s size=%s limit=%s",
+                file.filename, fmt_size(e.file_size_bytes),
+                fmt_size(e.max_size_bytes),
+            )
+            safe_unlink(dest)
+            return None
 
         except IncompleteDownloadError as e:
             logger.warning(
@@ -832,6 +916,14 @@ class DownloadPipeline:
         elif max_file_size_bytes and bytes_downloaded > max_file_size_bytes:
             dest, was_truncated_final = await truncate_file(dest, max_file_size_bytes)
             bytes_downloaded = dest.stat().st_size if dest.exists() else bytes_downloaded
+
+        if max_file_size_bytes and bytes_downloaded > max_file_size_bytes:
+            # Обрезка не удалась — не отдаём гигантский битый файл.
+            raise FileSizeLimitExceededError(
+                filename=file.filename,
+                file_size_bytes=bytes_downloaded,
+                max_size_bytes=max_file_size_bytes,
+            )
 
         final_type = map_type(file.type)
         media_metadata = await enrich_media_metadata(

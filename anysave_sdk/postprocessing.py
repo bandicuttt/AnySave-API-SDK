@@ -11,6 +11,7 @@ import asyncio
 import logging
 import re
 import subprocess
+import time
 
 from contextlib import suppress
 from pathlib import Path
@@ -800,6 +801,7 @@ async def download_hls_via_cdn(
     output_path: Path,
     timeout_seconds: float = 900.0,
     max_concurrent: int = 4,
+    max_size_bytes: int | None = None,
 ) -> bool:
     """
     Скачивает HLS видео напрямую с CDN (extra.processing.base_url сценарий).
@@ -814,6 +816,13 @@ async def download_hls_via_cdn(
     5. remux в MP4 через ffmpeg -c copy.
 
     AES-128 шифрование не поддерживается → False (caller делает fallback).
+
+    max_size_bytes:
+        Лимит размера итогового файла. Сегменты дискретны, поэтому проверка
+        размера .tmp.ts делается между волнами закачки: при достижении лимита
+        оставшиеся сегменты не качаются, .ts ремуксится в валидный
+        обрезанный mp4 (стоимость remux не зависит от того, докачали ли мы
+        все сегменты — ffmpeg и так запускается один раз в конце).
 
     Returns:
         True при успехе, False при любой ошибке.
@@ -877,20 +886,39 @@ async def download_hls_via_cdn(
                         )
                         return None
 
-            results = await asyncio.gather(
-                *[fetch_segment(i, u) for i, u in enumerate(segment_urls)]
-            )
-            if any(r is None for r in results):
-                return False
-
+            # Сегменты дискретны — качаем волнами по max_concurrent и проверяем
+            # размер tmp-файла между волнами. Это дешевле, чем качать всё
+            # подряд: за лимитом мы не платим ни трафиком, ни диском.
+            bytes_written = 0
+            segments_fetched = 0
             with tmp_ts.open("wb") as f:
-                for chunk in results:
-                    assert chunk is not None
-                    f.write(chunk[1])
+                for wave_start in range(0, total, max_concurrent):
+                    wave = segment_urls[wave_start:wave_start + max_concurrent]
+                    results = await asyncio.gather(
+                        *[fetch_segment(wave_start + i, u)
+                          for i, u in enumerate(wave)]
+                    )
+                    if any(r is None for r in results):
+                        return False
+                    for chunk in results:
+                        assert chunk is not None
+                        f.write(chunk[1])
+                        bytes_written += len(chunk[1])
+                    segments_fetched = wave_start + len(wave)
+                    if max_size_bytes and bytes_written >= max_size_bytes:
+                        logger.info(
+                            "HLS via CDN: size limit reached after %d/%d "
+                            "segments (%s, limit %s), stopping early → "
+                            "truncated mp4",
+                            segments_fetched, total,
+                            fmt_size(bytes_written), fmt_size(max_size_bytes),
+                        )
+                        break
 
         logger.info(
-            "HLS via CDN: %d segments in %.1fs, remuxing → %s",
-            len(segment_urls), _time.monotonic() - started, output_path.name,
+            "HLS via CDN: %d/%d segments in %.1fs, remuxing → %s",
+            segments_fetched, total, _time.monotonic() - started,
+            output_path.name,
         )
         if not await remux_ts_to_mp4(tmp_ts, output_path, timeout_seconds=timeout_seconds):
             return False
@@ -908,6 +936,8 @@ async def download_hls_stream(
     output_path: Path,
     timeout_seconds: float = 900.0,
     headers: dict[str, str] | None = None,
+    max_size_bytes: int | None = None,
+    size_check_interval_s: float = 2.0,
 ) -> bool:
     """
     Скачивает HLS/DASH manifest в локальный файл через ffmpeg.
@@ -918,6 +948,13 @@ async def download_hls_stream(
     headers:
         Опциональные browser-like headers для нестабильных CDN
         (например TikTok / Instagram / некоторые edge CDN).
+
+    max_size_bytes:
+        Лимит размера выходного файла. Мониторится раз в
+        ``size_check_interval_s``; при превышении ffmpeg убивается,
+        недописанный mp4 (moov не дописан) чинится ремуксом
+        (``fix_container``). Returns True, если получен валидный
+        (обрезанный) файл; False, если контейнер починить не удалось.
 
     Returns:
         True при успехе, False при ошибке.
@@ -959,18 +996,56 @@ async def download_hls_stream(
             stderr=subprocess.PIPE,
         )
 
-        try:
-            _, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=timeout_seconds,
-            )
-        except asyncio.TimeoutError:
+        # stderr читаем отдельной задачей: PIPE без читателя переполнился бы
+        # и заблокировал ffmpeg. Заодно это даёт монитор-цикл с stat() выходного
+        # файла — накладные расходы на скачивание нулевые.
+        assert process.stderr is not None
+        stderr_task = asyncio.ensure_future(process.stderr.read())
+        killed_by_limit = False
+
+        async def _kill_process() -> None:
             with suppress(ProcessLookupError):
                 process.kill()
                 await process.wait()
-            logger.warning("HLS download timed out: %s", manifest_url[:120])
-            return False
 
-        if process.returncode != 0:
+        try:
+            dl_start = time.monotonic()
+            while True:
+                try:
+                    await asyncio.wait_for(
+                        process.wait(), timeout=size_check_interval_s,
+                    )
+                    break  # ffmpeg завершился сам
+                except asyncio.TimeoutError:
+                    pass
+
+                if max_size_bytes and output_path.exists() \
+                        and output_path.stat().st_size >= max_size_bytes:
+                    await _kill_process()
+                    killed_by_limit = True
+                    logger.info(
+                        "HLS download stopped at size limit: %s "
+                        "(limit %s), fixing container...",
+                        fmt_size(output_path.stat().st_size),
+                        fmt_size(max_size_bytes),
+                    )
+                    break
+
+                if time.monotonic() - dl_start > timeout_seconds:
+                    await _kill_process()
+                    logger.warning(
+                        "HLS download timed out: %s", manifest_url[:120],
+                    )
+                    stderr_task.cancel()
+                    return False
+        except Exception:
+            await _kill_process()
+            stderr_task.cancel()
+            raise
+
+        stderr = await stderr_task
+
+        if process.returncode != 0 and not killed_by_limit:
             error_msg = stderr.decode("utf-8", errors="replace").strip()[:300]
             logger.warning(
                 "HLS download failed | url=%s returncode=%d error=%s",
@@ -979,6 +1054,21 @@ async def download_hls_stream(
                 error_msg,
             )
             return False
+
+        if killed_by_limit:
+            # mp4 без moov — чиним ремуксом в новый контейнер.
+            # fix_container сам подменяет исходный файл починенным.
+            _, fixed_ok = await fix_container(output_path)
+            if not fixed_ok or not output_path.exists() \
+                    or output_path.stat().st_size < 100:
+                logger.warning(
+                    "HLS truncated file cannot be repaired as a valid "
+                    "container, failing | url=%s",
+                    manifest_url[:120],
+                )
+                safe_unlink(output_path)
+                return False
+            return True
 
         return output_path.exists() and output_path.stat().st_size > 100
 

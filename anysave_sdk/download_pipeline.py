@@ -40,6 +40,7 @@ from anysave_sdk.postprocessing import (
     enrich_media_metadata,
     fetch_hls_manifest,
     fix_container,
+    is_fragmented_mp4,
     merge_video_audio,
     truncate_file,
 )
@@ -552,6 +553,105 @@ class DownloadPipeline:
             remote_file.url, dest, headers, max_size_bytes=max_file_size_bytes,
         )
 
+    async def _finalize_single_file(
+        self,
+        dest: Path,
+        remote_file: RemoteFile,
+        max_file_size_bytes: int | None,
+        is_partial: bool,
+    ) -> DownloadResult:
+        """Финализирует один файл: fix container, truncate, metadata, DownloadResult."""
+        if not dest.exists():
+            logger.warning(
+                "Finalize skipped: file missing on disk | path=%s",
+                dest,
+            )
+            return DownloadResult(
+                status=DownloadStatus.ERROR,
+                files=[],
+                error=ClientError(
+                    code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
+                    detail=f"File missing before finalize: {dest.name}",
+                ),
+            )
+
+        try:
+            file_size = dest.stat().st_size
+        except OSError as e:
+            logger.warning(
+                "Finalize skipped: cannot stat file | path=%s error=%s",
+                dest,
+                e,
+            )
+            return DownloadResult(
+                status=DownloadStatus.ERROR,
+                files=[],
+                error=ClientError(
+                    code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
+                    detail=f"Cannot stat file: {e}",
+                ),
+            )
+
+        was_truncated = False
+
+        # Чиним fMP4 из MUX pipe (merge-flow: video-only fallback или single stream)
+        if is_fragmented_mp4(dest):
+            dest, fixed = await fix_container(dest)
+            if fixed:
+                file_size = dest.stat().st_size
+                logger.info("Container fixed (merge-flow): %s", fmt_size(file_size))
+            else:
+                logger.warning(
+                    "fMP4 defragmentation failed in merge-flow, "
+                    "sending original file | %s",
+                    dest.name,
+                )
+
+        if max_file_size_bytes and file_size > max_file_size_bytes:
+            dest, was_truncated = await truncate_file(dest, max_file_size_bytes)
+            file_size = dest.stat().st_size if dest.exists() else 0
+
+        if max_file_size_bytes and file_size > max_file_size_bytes:
+            logger.warning(
+                "Merge-flow file exceeds size limit after truncation, "
+                "failing | file=%s size=%s limit=%s",
+                dest.name, fmt_size(file_size), fmt_size(max_file_size_bytes),
+            )
+            safe_unlink(dest)
+            return DownloadResult(
+                status=DownloadStatus.ERROR,
+                files=[],
+                error=ClientError(
+                    code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
+                    detail=f"File too large after truncation: {fmt_size(file_size)}",
+                ),
+            )
+
+        final_type = map_type(remote_file.type)
+        media_metadata = await enrich_media_metadata(
+            filepath=dest,
+            file_type=final_type,
+            current=remote_file.extra.metadata if remote_file.extra else None,
+            thumbnail_placeholder=self.thumbnail_placeholder,
+        )
+
+        downloaded_file = DownloadedFile(
+            type=final_type,
+            path=str(dest),
+            file_size_bytes=file_size,
+            is_truncated=was_truncated,
+            extra=DownloadedFileExtra(metadata=media_metadata) if media_metadata else None,
+        )
+
+        return DownloadResult(
+            status=DownloadStatus.PARTIAL if is_partial else DownloadStatus.SUCCESS,
+            files=[downloaded_file],
+            error=ClientError(
+                code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
+                detail="Audio download failed, video-only returned",
+            ) if is_partial else None,
+        )
+
     async def _stream_via_aiohttp(
         self,
         url: str,
@@ -653,96 +753,6 @@ class DownloadPipeline:
             )
             safe_unlink(dest)
             return False
-
-    async def _finalize_single_file(
-        self,
-        dest: Path,
-        remote_file: RemoteFile,
-        max_file_size_bytes: int | None,
-        is_partial: bool,
-    ) -> DownloadResult:
-        """Финализирует один файл: truncate, metadata, DownloadResult."""
-        if not dest.exists():
-            logger.warning(
-                "Finalize skipped: file missing on disk | path=%s",
-                dest,
-            )
-            return DownloadResult(
-                status=DownloadStatus.ERROR,
-                files=[],
-                error=ClientError(
-                    code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
-                    detail=f"File missing before finalize: {dest.name}",
-                ),
-            )
-
-        try:
-            file_size = dest.stat().st_size
-        except OSError as e:
-            logger.warning(
-                "Finalize skipped: cannot stat file | path=%s error=%s",
-                dest,
-                e,
-            )
-            return DownloadResult(
-                status=DownloadStatus.ERROR,
-                files=[],
-                error=ClientError(
-                    code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
-                    detail=f"Cannot stat file: {e}",
-                ),
-            )
-
-        was_truncated = False
-
-        if max_file_size_bytes and file_size > max_file_size_bytes:
-            dest, was_truncated = await truncate_file(dest, max_file_size_bytes)
-            file_size = dest.stat().st_size if dest.exists() else 0
-            if file_size > max_file_size_bytes:
-                logger.warning(
-                    "File exceeds size limit and cannot be truncated, "
-                    "failing | file=%s size=%s limit=%s",
-                    dest.name, fmt_size(file_size),
-                    fmt_size(max_file_size_bytes),
-                )
-                safe_unlink(dest)
-                return DownloadResult(
-                    status=DownloadStatus.ERROR,
-                    files=[],
-                    error=ClientError(
-                        code=ClientErrorCode.FILE_TOO_LARGE.value,
-                        detail=(
-                            f"{dest.name}: {fmt_size(file_size)} exceeds limit "
-                            f"{fmt_size(max_file_size_bytes)} and cannot be "
-                            "truncated to a valid file"
-                        ),
-                    ),
-                )
-
-        final_type = map_type(remote_file.type)
-        media_metadata = await enrich_media_metadata(
-            filepath=dest,
-            file_type=final_type,
-            current=remote_file.extra.metadata if remote_file.extra else None,
-            thumbnail_placeholder=self.thumbnail_placeholder,
-        )
-
-        downloaded_file = DownloadedFile(
-            type=final_type,
-            path=str(dest),
-            file_size_bytes=file_size,
-            is_truncated=was_truncated,
-            extra=DownloadedFileExtra(metadata=media_metadata) if media_metadata else None,
-        )
-
-        return DownloadResult(
-            status=DownloadStatus.PARTIAL if is_partial else DownloadStatus.SUCCESS,
-            files=[downloaded_file],
-            error=ClientError(
-                code=ClientErrorCode.SOME_DOWNLOADS_FAILED.value,
-                detail="Audio download failed, video-only returned",
-            ) if is_partial else None,
-        )
 
     # ─── Legacy API response download (sync / tasks flow) ────
 
@@ -903,15 +913,26 @@ class DownloadPipeline:
         """Финализация после успешного скачивания: fix container, truncate, metadata."""
         was_truncated_final = is_truncated or was_cut
 
-        if was_cut:
+        # Чиним контейнер если стрим был обрезан ИЛИ файл — fragmented MP4
+        # (MUX pipe отдаёт fMP4, который Telegram не воспринимает как progressive).
+        needs_container_fix = was_cut or is_fragmented_mp4(dest)
+
+        if needs_container_fix:
             dest, fixed = await fix_container(dest)
             if fixed:
                 bytes_downloaded = dest.stat().st_size
                 logger.info("Container fixed: %s", fmt_size(bytes_downloaded))
-            else:
+            elif was_cut:
+                # Обрезанный стрим с битым контейнером — пробуем truncate
                 logger.info("Container fix failed, trying ffmpeg truncation")
                 dest, was_truncated_final = await truncate_file(dest, max_file_size_bytes)
                 bytes_downloaded = dest.stat().st_size if dest.exists() else 0
+            else:
+                # fMP4 детектирован, но remux упал — отдаём исходник (лучше fMP4, чем ничего)
+                logger.warning(
+                    "fMP4 defragmentation failed, sending original file | %s",
+                    dest.name,
+                )
 
         elif max_file_size_bytes and bytes_downloaded > max_file_size_bytes:
             dest, was_truncated_final = await truncate_file(dest, max_file_size_bytes)

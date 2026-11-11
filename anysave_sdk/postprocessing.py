@@ -154,6 +154,90 @@ async def truncate_file(
     return filepath, True
 
 
+def is_fragmented_mp4(filepath: Path) -> bool:
+    """
+    Определяет, является ли файл fragmented MP4 (fMP4).
+
+    Парсит ISO BMFF box'ы в первых 64 KB файла:
+    - ``moof`` на верхнем уровне — однозначный признак fMP4.
+    - ``mvex`` внутри ``moov`` — Movie Extends, признак fMP4.
+
+    Returns:
+        True если файл — fMP4, False для progressive MP4, non-MP4 и при ошибках.
+    """
+    _READ_SIZE = 65536  # 64 KB — moov в fMP4 компактный (нет stbl sample tables)
+
+    try:
+        if not filepath.exists() or filepath.stat().st_size < 12:
+            return False
+
+        with open(filepath, "rb") as f:
+            data = f.read(_READ_SIZE)
+
+        if len(data) < 8 or data[4:8] != b"ftyp":
+            return False
+
+        offset = 0
+        length = len(data)
+
+        while offset + 8 <= length:
+            box_size = int.from_bytes(data[offset : offset + 4], "big")
+            box_type = data[offset + 4 : offset + 8]
+
+            header_size = 8
+            if box_size == 1:
+                if offset + 16 > length:
+                    break
+                box_size = int.from_bytes(data[offset + 8 : offset + 16], "big")
+                header_size = 16
+            elif box_size == 0:
+                box_size = length - offset
+
+            if box_size < header_size:
+                break
+
+            # moof на верхнем уровне = фрагментированный контейнер
+            if box_type == b"moof":
+                logger.debug("fMP4 detected (moof): %s", filepath.name)
+                return True
+
+            # Заглядываем внутрь moov в поисках mvex
+            if box_type == b"moov":
+                inner = offset + header_size
+                inner_end = min(offset + box_size, length)
+
+                while inner + 8 <= inner_end:
+                    i_size = int.from_bytes(data[inner : inner + 4], "big")
+                    i_type = data[inner + 4 : inner + 8]
+
+                    i_header = 8
+                    if i_size == 1:
+                        if inner + 16 > length:
+                            break
+                        i_size = int.from_bytes(
+                            data[inner + 8 : inner + 16], "big"
+                        )
+                        i_header = 16
+                    elif i_size == 0:
+                        i_size = inner_end - inner
+
+                    if i_size < i_header:
+                        break
+
+                    if i_type == b"mvex":
+                        logger.debug("fMP4 detected (mvex in moov): %s", filepath.name)
+                        return True
+
+                    inner += i_size
+
+            offset += box_size
+
+        return False
+
+    except Exception:
+        return False
+
+
 async def enrich_media_metadata(
     filepath: Path,
     file_type: str,
